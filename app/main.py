@@ -1,5 +1,11 @@
 import logging
+import os
 from pathlib import Path
+
+from dotenv import load_dotenv
+
+
+load_dotenv()
 
 
 LOG_DIR = Path("logs")
@@ -20,6 +26,10 @@ logging.basicConfig(
 
 def main():
     logger = logging.getLogger(__name__)
+
+    app_name = os.getenv("APP_NAME")
+
+    logger.info("Application: %s", app_name)
     logger.info("Automation platform started")
 
 
