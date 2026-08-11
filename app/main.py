@@ -1,3 +1,4 @@
+from browser import get_portal_balance
 import logging
 import os
 from pathlib import Path
@@ -6,7 +7,6 @@ from dotenv import load_dotenv
 
 
 load_dotenv()
-
 
 LOG_DIR = Path("logs")
 LOG_DIR.mkdir(exist_ok=True)
@@ -30,7 +30,14 @@ def main():
     app_name = os.getenv("APP_NAME")
 
     logger.info("Application: %s", app_name)
-    logger.info("Automation platform started")
+    logger.info("Starting portal check")
+
+    balance = get_portal_balance()
+
+    if balance:
+        logger.info("Balance retrieved successfully: %s", balance)
+    else:
+        logger.error("Unable to retrieve balance")
 
 
 if __name__ == "__main__":
