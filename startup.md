@@ -64,19 +64,31 @@ git switch test-balance-logic
 
 ---
 
-## 6. Start Chrome in Remote Debugging Mode
+## 6. Start a Chromium Browser in Remote Debugging Mode
 
-Close all existing Chrome windows first if Chrome is already using the required profile.
+Close all existing browser windows first if the chosen profile is already in use.
+
+Set the browser executable path you want to use:
+
+```powershell
+$env:CHROME_BROWSER_PATH = "C:\Program Files\Google\Chrome\Application\chrome.exe"
+```
+
+Or, for Brave:
+
+```powershell
+$env:BRAVE_BROWSER_PATH = "C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe"
+```
 
 Then run:
 
 ```powershell
-& "C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9222 --user-data-dir="C:\chrome-debug-profile"
+& $env:CHROME_BROWSER_PATH --remote-debugging-port=9222 --user-data-dir="C:\chrome-debug-profile"
 ```
 
-Keep this Chrome window open.
+Keep this browser window open.
 
-Open the required pages in this Chrome instance:
+Open the required pages in this browser instance:
 
 * Retailer Dashboard
 * WhatsApp Web
@@ -102,15 +114,35 @@ python app\main.py
 ```
 
 The script now runs continuously in a scheduling loop. By default it checks the
-portal every 300 seconds and sends the balance to the WhatsApp group
-`Automations test`.
+portal on 5-minute wall-clock boundaries and sends the balance to the WhatsApp
+group `Automations test`.
+
+To let the app launch a browser profile for you, pass a browser name:
+
+```powershell
+python app\main.py chrome
+python app\main.py brave
+```
+
+Use `chrome` or `brave` to launch that browser with its own remote-debug profile.
+If you omit the argument, the app uses the already-running browser session.
 
 Optional environment variables:
 
 ```powershell
 $env:WHATSAPP_GROUP_NAME = "Automations test"
 $env:CHECK_INTERVAL_SECONDS = "300"
+$env:PORTAL_URL = "https://example-portal-url/"
+$env:WHATSAPP_URL = "https://web.whatsapp.com/"
+$env:CHROME_BROWSER_PATH = "C:\Program Files\Google\Chrome\Application\chrome.exe"
+$env:CHROME_USER_DATA_DIR = "C:\chrome-debug-profile"
+$env:BRAVE_BROWSER_PATH = "C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe"
+$env:BRAVE_USER_DATA_DIR = "C:\brave-debug-profile"
+$env:REMOTE_DEBUGGING_PORT = "9222"
 ```
+
+If the portal or WhatsApp tab is missing, the app will open the URL in a new
+tab inside the same remote-debug browser session.
 
 ---
 
@@ -118,14 +150,17 @@ $env:CHECK_INTERVAL_SECONDS = "300"
 
 For normal daily startup, the main commands are:
 
-### Terminal 1 — Chrome
+### Terminal 1 — Browser
 
 ```powershell
 cd "C:\Users\Kovid Singh Parihar\Documents\My projects\MK balance\automation-platform-test"
 
 .\.venv\Scripts\Activate.ps1
 
-& "C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9222 --user-data-dir="C:\chrome-debug-profile"
+$env:CHROME_BROWSER_PATH = "C:\Program Files\Google\Chrome\Application\chrome.exe"
+# Or set Brave instead:
+# $env:BRAVE_BROWSER_PATH = "C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe"
+& $env:CHROME_BROWSER_PATH --remote-debugging-port=9222 --user-data-dir="C:\chrome-debug-profile"
 ```
 
 ### Terminal 2 — Automation
@@ -139,7 +174,7 @@ git status
 
 git branch
 
-python app\main.py
+python app\main.py chrome
 ```
 
 ---

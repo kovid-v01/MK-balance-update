@@ -1,5 +1,6 @@
 import logging
 import re
+import os
 
 from playwright.sync_api import sync_playwright
 
@@ -9,6 +10,7 @@ logger = logging.getLogger(__name__)
 DEBUG_URL = "http://localhost:9222"
 PORTAL_TITLE = "RetailerDashboard"
 WHATSAPP_TITLE = "WhatsApp"
+DEFAULT_WHATSAPP_URL = "https://web.whatsapp.com/"
 BALANCE_SELECTOR = ".balance-amount"
 WHATSAPP_SEARCH_TIMEOUT_MS = 15000
 WHATSAPP_MESSAGE_TIMEOUT_MS = 10000
@@ -21,6 +23,24 @@ def _find_page(pages, title_fragment, url_fragment=None):
             return page
         if url_fragment and url_fragment in page.url:
             return page
+
+    return None
+
+
+def _open_page(context, url):
+    page = context.new_page()
+    page.goto(url, wait_until="domcontentloaded")
+    return page
+
+
+def _first_existing_locator(page, selectors):
+    for selector in selectors:
+        locator = page.locator(selector).first
+        try:
+            if locator.count() > 0:
+                return locator
+        except Exception:
+            continue
 
     return None
 
@@ -44,15 +64,15 @@ def get_portal_balance():
 
         logger.info("Found %s open tab(s)", len(pages))
 
-        portal_page = None
+        portal_url = os.getenv("PORTAL_URL")
+        portal_page = _find_page(pages, PORTAL_TITLE, portal_url)
 
-        for page in pages:
-            if PORTAL_TITLE in page.title():
-                portal_page = page
-                break
+        if portal_page is None and portal_url:
+            logger.info("RetailerDashboard tab not found; opening portal URL")
+            portal_page = _open_page(context, portal_url)
 
         if portal_page is None:
-            logger.error("RetailerDashboard tab not found")
+            logger.error("RetailerDashboard tab not found and PORTAL_URL is not set")
             return None
 
         logger.info("RetailerDashboard tab found")
@@ -92,23 +112,35 @@ def send_whatsapp_message(group_name, message):
 
         logger.info("Found %s open tab(s)", len(pages))
 
-        whatsapp_page = _find_page(pages, WHATSAPP_TITLE, "web.whatsapp.com")
+        whatsapp_url = os.getenv("WHATSAPP_URL", DEFAULT_WHATSAPP_URL)
+        whatsapp_page = _find_page(pages, WHATSAPP_TITLE, whatsapp_url)
 
         if whatsapp_page is None:
-            logger.error("WhatsApp tab not found")
-            return False
+            logger.info("WhatsApp tab not found; opening WhatsApp URL")
+            whatsapp_page = _open_page(context, whatsapp_url)
 
         logger.info("WhatsApp tab found")
         whatsapp_page.bring_to_front()
 
-        search_box = (
-            whatsapp_page.locator('div[contenteditable="true"][aria-label*="Search"]')
-            .first
+        search_box = _first_existing_locator(
+            whatsapp_page,
+            [
+                'input[aria-label*="Search"]',
+                'div[contenteditable="true"][aria-label*="Search"]',
+                'div[role="textbox"][aria-label*="Search"]',
+            ],
         )
+
+        if search_box is None:
+            logger.error("WhatsApp search box not found")
+            return False
 
         search_box.wait_for(state="visible", timeout=WHATSAPP_SEARCH_TIMEOUT_MS)
         search_box.click()
-        search_box.fill(group_name)
+        try:
+            search_box.fill(group_name)
+        except Exception:
+            search_box.type(group_name)
         whatsapp_page.keyboard.press("Enter")
 
         logger.info("Searching for WhatsApp group: %s", group_name)
@@ -117,14 +149,27 @@ def send_whatsapp_message(group_name, message):
         chat_title.wait_for(state="visible", timeout=WHATSAPP_SEARCH_TIMEOUT_MS)
         chat_title.click()
 
-        message_box = (
-            whatsapp_page.locator('div[contenteditable="true"][aria-label*="message"]')
-            .first
+        message_box = _first_existing_locator(
+            whatsapp_page,
+            [
+                'footer [contenteditable="true"]',
+                'footer [role="textbox"]',
+                'div[contenteditable="true"][aria-label*="message"]',
+                'div[contenteditable="true"][data-tab="10"]',
+                'div[aria-label*="Type a message"]',
+            ],
         )
+
+        if message_box is None:
+            logger.error("WhatsApp message box not found")
+            return False
 
         message_box.wait_for(state="visible", timeout=WHATSAPP_MESSAGE_TIMEOUT_MS)
         message_box.click()
-        message_box.fill(message)
+        try:
+            message_box.fill(message)
+        except Exception:
+            message_box.type(message)
         whatsapp_page.keyboard.press("Enter")
 
         logger.info("WhatsApp message sent to %s", group_name)
