@@ -101,6 +101,17 @@ Then start the application:
 python app\main.py
 ```
 
+The script now runs continuously in a scheduling loop. By default it checks the
+portal every 300 seconds and sends the balance to the WhatsApp group
+`Automations test`.
+
+Optional environment variables:
+
+```powershell
+$env:WHATSAPP_GROUP_NAME = "Automations test"
+$env:CHECK_INTERVAL_SECONDS = "300"
+```
+
 ---
 
 # Quick Startup
