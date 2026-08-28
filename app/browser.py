@@ -45,13 +45,40 @@ def _first_existing_locator(page, selectors):
     return None
 
 
-def get_portal_balance():
+def ensure_whatsapp_tab_open():
     with sync_playwright() as p:
-        logger.info("Connecting to existing Chrome browser")
+        logger.info("Checking for WhatsApp tab")
 
         browser = p.chromium.connect_over_cdp(DEBUG_URL)
 
-        logger.info("Connected to Chrome successfully")
+        contexts = browser.contexts
+        if not contexts:
+            logger.error("No browser context found")
+            return False
+
+        context = contexts[0]
+        pages = context.pages
+
+        whatsapp_url = os.getenv("WHATSAPP_URL", DEFAULT_WHATSAPP_URL)
+        whatsapp_page = _find_page(pages, WHATSAPP_TITLE, whatsapp_url)
+
+        if whatsapp_page is None:
+            logger.info("WhatsApp tab not found; opening WhatsApp URL")
+            whatsapp_page = _open_page(context, whatsapp_url)
+        else:
+            logger.info("WhatsApp tab already open")
+
+        whatsapp_page.bring_to_front()
+        return True
+
+
+def get_portal_balance():
+    with sync_playwright() as p:
+        logger.info("Connecting to the existing browser session")
+
+        browser = p.chromium.connect_over_cdp(DEBUG_URL)
+
+        logger.info("Connected to browser successfully")
 
         contexts = browser.contexts
 
@@ -95,11 +122,11 @@ def get_portal_balance():
 
 def send_whatsapp_message(group_name, message):
     with sync_playwright() as p:
-        logger.info("Connecting to existing Chrome browser")
+        logger.info("Connecting to the existing browser session")
 
         browser = p.chromium.connect_over_cdp(DEBUG_URL)
 
-        logger.info("Connected to Chrome successfully")
+        logger.info("Connected to browser successfully")
 
         contexts = browser.contexts
 

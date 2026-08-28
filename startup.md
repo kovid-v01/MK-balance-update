@@ -74,7 +74,7 @@ Set the browser executable path you want to use:
 $env:CHROME_BROWSER_PATH = "C:\Program Files\Google\Chrome\Application\chrome.exe"
 ```
 
-Or, for Brave:
+Or use Brave:
 
 ```powershell
 $env:BRAVE_BROWSER_PATH = "C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe"
@@ -84,6 +84,12 @@ Then run:
 
 ```powershell
 & $env:CHROME_BROWSER_PATH --remote-debugging-port=9222 --user-data-dir="C:\chrome-debug-profile"
+```
+
+Or, for Brave:
+
+```powershell
+& $env:BRAVE_BROWSER_PATH --remote-debugging-port=9222 --user-data-dir="C:\brave-debug-profile"
 ```
 
 Keep this browser window open.
@@ -120,8 +126,8 @@ group `Automations test`.
 To let the app launch a browser profile for you, pass a browser name:
 
 ```powershell
-python app\main.py chrome
 python app\main.py brave
+python app\main.py chrome
 ```
 
 Use `chrome` or `brave` to launch that browser with its own remote-debug profile.
@@ -161,6 +167,9 @@ $env:CHROME_BROWSER_PATH = "C:\Program Files\Google\Chrome\Application\chrome.ex
 # Or set Brave instead:
 # $env:BRAVE_BROWSER_PATH = "C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe"
 & $env:CHROME_BROWSER_PATH --remote-debugging-port=9222 --user-data-dir="C:\chrome-debug-profile"
+
+# Or launch Brave instead:
+# & $env:BRAVE_BROWSER_PATH --remote-debugging-port=9222 --user-data-dir="C:\brave-debug-profile"
 ```
 
 ### Terminal 2 — Automation
@@ -175,6 +184,9 @@ git status
 git branch
 
 python app\main.py chrome
+
+# Or use Brave:
+# python app\main.py brave
 ```
 
 ---
@@ -279,7 +291,7 @@ pip freeze > requirements.txt
 netstat -ano | findstr :9222
 ```
 
-If Chrome remote debugging is running correctly, port `9222` should appear.
+If Chrome or Brave remote debugging is running correctly, port `9222` should appear.
 
 ## Check Git Remote
 

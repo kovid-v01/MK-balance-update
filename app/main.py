@@ -9,7 +9,7 @@ from datetime import datetime, timedelta
 
 from dotenv import load_dotenv
 
-from browser import get_portal_balance, send_whatsapp_message
+from browser import ensure_whatsapp_tab_open, get_portal_balance, send_whatsapp_message
 
 
 load_dotenv()
@@ -25,6 +25,7 @@ DEFAULT_CHROME_PATH = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
 DEFAULT_BRAVE_PATH = r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe"
 DEFAULT_CHROME_PROFILE_DIR = r"C:\chrome-debug-profile"
 DEFAULT_BRAVE_PROFILE_DIR = r"C:\brave-debug-profile"
+SUPPORTED_BROWSER_NAMES = {"existing", "chrome", "brave"}
 
 
 def _parse_balance_value(balance_text):
@@ -81,9 +82,32 @@ def _browser_config(browser_name):
     return None
 
 
+def _validate_browser_config(browser_name, config):
+    if config is None:
+        return True
+
+    browser_path = Path(config["path"])
+    user_data_dir = Path(config["user_data_dir"])
+    logger = logging.getLogger(__name__)
+
+    if not browser_path.exists():
+        logger.error(
+            "%s browser executable not found: %s",
+            browser_name,
+            browser_path,
+        )
+        return False
+
+    user_data_dir.mkdir(parents=True, exist_ok=True)
+    return True
+
+
 def _launch_browser(browser_name):
     config = _browser_config(browser_name)
     if config is None:
+        return None
+
+    if not _validate_browser_config(browser_name, config):
         return None
 
     browser_path = config["path"]
@@ -118,6 +142,14 @@ logging.basicConfig(
 def main():
     logger = logging.getLogger(__name__)
     browser_name = sys.argv[1] if len(sys.argv) > 1 else "existing"
+    browser_name = browser_name.lower()
+
+    if browser_name not in SUPPORTED_BROWSER_NAMES:
+        logger.error(
+            "Unsupported browser mode: %s. Use existing, chrome, or brave.",
+            browser_name,
+        )
+        sys.exit(1)
 
     app_name = os.getenv("APP_NAME")
     group_name = os.getenv("WHATSAPP_GROUP_NAME", DEFAULT_GROUP_NAME)
@@ -135,12 +167,22 @@ def main():
         logger.info("Waiting for browser remote debugging to become ready")
         time.sleep(5)
 
+    try:
+        ensure_whatsapp_tab_open()
+    except Exception:
+        logger.exception("WhatsApp pre-open check failed")
+
     while True:
         logger.info("Starting portal check")
 
-        balance = get_portal_balance()
+        try:
+            balance = get_portal_balance()
+        except Exception:
+            logger.exception("Portal balance retrieval failed")
+            _sleep_until_next_run(check_interval_seconds, logger)
+            continue
 
-        if not balance:
+        if balance is None or str(balance).strip() == "":
             logger.error("Unable to retrieve balance")
             _sleep_until_next_run(check_interval_seconds, logger)
             continue
@@ -155,7 +197,13 @@ def main():
             continue
 
         message = _build_message(balance, app_name)
-        sent = send_whatsapp_message(group_name, message)
+        logger.info("Preparing WhatsApp update")
+
+        try:
+            sent = send_whatsapp_message(group_name, message)
+        except Exception:
+            logger.exception("WhatsApp send failed")
+            sent = False
 
         if sent:
             logger.info("Balance update sent to WhatsApp group")
