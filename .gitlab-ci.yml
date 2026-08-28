@@ -1,0 +1,17 @@
+stages:
+  - validate
+
+validate_python:
+  stage: validate
+  image: python:3.11
+  variables:
+    PIP_DISABLE_PIP_VERSION_CHECK: "1"
+    PYTHONDONTWRITEBYTECODE: "1"
+  cache:
+    paths:
+      - .cache/pip
+  before_script:
+    - python -m pip install --upgrade pip
+    - python -m pip install --cache-dir .cache/pip -r requirements.txt
+  script:
+    - python -m py_compile app/main.py app/browser.py
