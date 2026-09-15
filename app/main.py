@@ -9,7 +9,13 @@ from datetime import datetime, timedelta
 
 from dotenv import load_dotenv
 
-from browser import ensure_whatsapp_tab_open, get_portal_balance, send_whatsapp_message
+from browser import (
+    ensure_whatsapp_tab_open,
+    get_portal_balance,
+    open_browser_session,
+    send_whatsapp_message,
+)
+from decision_engine import Action, evaluate_balance
 
 
 load_dotenv()
@@ -37,11 +43,6 @@ def _parse_balance_value(balance_text):
         return None
 
     return float(match.group(0).replace(",", ""))
-
-
-def _build_message(balance_text, app_name):
-    label = app_name or "MK Balance"
-    return f"{label}: {balance_text}"
 
 
 def _next_run_at(now, interval_seconds):
@@ -167,50 +168,69 @@ def main():
         logger.info("Waiting for browser remote debugging to become ready")
         time.sleep(5)
 
-    try:
-        ensure_whatsapp_tab_open()
-    except Exception:
-        logger.exception("WhatsApp pre-open check failed")
-
-    while True:
-        logger.info("Starting portal check")
-
+    with open_browser_session() as browser:
         try:
-            balance = get_portal_balance()
+            ensure_whatsapp_tab_open(browser)
         except Exception:
-            logger.exception("Portal balance retrieval failed")
+            logger.exception("WhatsApp pre-open check failed")
+
+        while True:
+            logger.info("Starting portal check")
+
+            try:
+                balance = get_portal_balance(browser)
+            except Exception:
+                logger.exception("Portal balance retrieval failed")
+                _sleep_until_next_run(check_interval_seconds, logger)
+                continue
+
+            if balance is None or str(balance).strip() == "":
+                logger.error("Unable to retrieve balance")
+                _sleep_until_next_run(check_interval_seconds, logger)
+                continue
+
+            logger.info("Balance retrieved successfully: %s", balance)
+
+            balance_value = _parse_balance_value(balance)
+
+            decision = evaluate_balance(
+                balance_value=balance_value,
+                balance_text=balance,
+                app_name=app_name,
+            )
+
+            logger.info(
+                "Decision: action=%s severity=%s reason=%s",
+                decision.action.value,
+                decision.severity.value,
+                decision.reason,
+            )
+
+            if decision.action == Action.NO_ACTION:
+                _sleep_until_next_run(check_interval_seconds, logger)
+                continue
+
+            message = decision.message
+
+            logger.info("Preparing WhatsApp update")
+
+            try:
+                sent = send_whatsapp_message(
+                    browser,
+                    group_name,
+                    message,
+                    mention_everyone=decision.mention_everyone,
+                )
+            except Exception:
+                logger.exception("WhatsApp send failed")
+                sent = False
+
+            if sent:
+                logger.info("Balance update sent to WhatsApp group")
+            else:
+                logger.error("Unable to send WhatsApp message")
+
             _sleep_until_next_run(check_interval_seconds, logger)
-            continue
-
-        if balance is None or str(balance).strip() == "":
-            logger.error("Unable to retrieve balance")
-            _sleep_until_next_run(check_interval_seconds, logger)
-            continue
-
-        logger.info("Balance retrieved successfully: %s", balance)
-
-        balance_value = _parse_balance_value(balance)
-
-        if balance_value is not None and balance_value < 0:
-            logger.error("Negative balance detected; skipping WhatsApp send: %s", balance)
-            _sleep_until_next_run(check_interval_seconds, logger)
-            continue
-
-        message = _build_message(balance, app_name)
-        logger.info("Preparing WhatsApp update")
-
-        try:
-            sent = send_whatsapp_message(group_name, message)
-        except Exception:
-            logger.exception("WhatsApp send failed")
-            sent = False
-
-        if sent:
-            logger.info("Balance update sent to WhatsApp group")
-        else:
-            logger.error("Unable to send WhatsApp message")
-
-        _sleep_until_next_run(check_interval_seconds, logger)
 
 
 if __name__ == "__main__":
