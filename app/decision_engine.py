@@ -25,7 +25,15 @@ class Decision:
     mention_everyone: bool = False
 
 
-LOW_BALANCE_THRESHOLD = 5_000_000
+# Amounts are in rupees.  Check the lowest threshold first so the message
+# always reflects the most severe applicable level.
+BALANCE_ALERT_THRESHOLDS = (
+    (1_000_000, "10 L", Severity.CRITICAL),
+    (3_000_000, "30 L", Severity.HIGH),
+    (5_000_000, "50 L", Severity.WARNING),
+    (10_000_000, "1 CR", Severity.WARNING),
+)
+MESSAGE_SUPPRESSION_THRESHOLD = 10_000
 
 
 def evaluate_balance(balance_value, balance_text, app_name=None):
@@ -52,20 +60,26 @@ def evaluate_balance(balance_value, balance_text, app_name=None):
             reason="Negative balance detected. WhatsApp update suppressed.",
         )
 
-    label = app_name or "MK Balance"
-
-    if balance_value < LOW_BALANCE_THRESHOLD:
+    # Do not send either scheduled balance updates or threshold alerts once
+    # the balance is under Rs. 10,000.
+    if balance_value < MESSAGE_SUPPRESSION_THRESHOLD:
         return Decision(
-            action=Action.ALERT,
-            severity=Severity.HIGH,
-            reason=(
-                "Balance is below the low-balance threshold of "
-                f"{LOW_BALANCE_THRESHOLD:,.0f}."
-            ),
-            message=f"Low balance alert: {label} is {balance_text}.",
-            mention_everyone=True,
+            action=Action.NO_ACTION,
+            severity=Severity.CRITICAL,
+            reason="Balance is below Rs. 10,000. WhatsApp update suppressed.",
         )
 
+    for threshold, threshold_label, severity in BALANCE_ALERT_THRESHOLDS:
+        if balance_value < threshold:
+            return Decision(
+                action=Action.ALERT,
+                severity=severity,
+                reason=f"Balance is below the Rs. {threshold_label} threshold.",
+                message=f"Balance is below {threshold_label}",
+                mention_everyone=True,
+            )
+
+    label = app_name or "MK Balance"
     return Decision(
         action=Action.SEND_BALANCE,
         severity=Severity.NORMAL,
