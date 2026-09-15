@@ -103,7 +103,54 @@ Make sure both are logged in before starting the automation.
 
 ---
 
-## 7. Run the Automation
+## 7. Run a Second Automation with Its Own Browser Profile
+
+Use a separate browser profile and remote-debugging port for each automation.
+This is the supported way to run two automations in parallel because each one
+has independent browser tabs and WhatsApp state.
+
+In a second browser terminal, start Chrome with port `9223` and a new profile:
+
+```powershell
+$env:CHROME_BROWSER_PATH = "C:\Program Files\Google\Chrome\Application\chrome.exe"
+& $env:CHROME_BROWSER_PATH --remote-debugging-port=9223 --user-data-dir="C:\chrome-debug-profile-2"
+```
+
+Log in to the retailer portal and WhatsApp Web in that second browser. Then,
+in a second automation terminal, point the application to port `9223` before
+starting it:
+
+```powershell
+cd "C:\Users\Kovid Singh Parihar\Documents\My projects\MK balance\automation-platform-test"
+.\.venv\Scripts\Activate.ps1
+
+$env:REMOTE_DEBUGGING_PORT = "9223"
+$env:WHATSAPP_GROUP_NAME = "Automations test 2"
+python app\main.py
+```
+
+Use a separate WhatsApp group for the second automation unless duplicate
+messages to the same group are intentional.
+
+## 8. Two Automations Sharing One Browser Profile (Not Recommended)
+
+Two application processes can attach to the same already-running browser
+profile on port `9222`. Start the browser once, then run this command in each
+of two separate automation terminals:
+
+```powershell
+python app\main.py
+```
+
+Both processes will control the same portal and WhatsApp tabs. They can race
+to refresh pages, search chats, type messages, and send duplicate updates.
+Use this only for short-lived troubleshooting; do not use it for normal
+operations. Do not start the second process with `python app\main.py chrome`,
+because Chrome cannot safely open the same profile in a second browser process.
+
+---
+
+## 9. Run the Automation
 
 Open another PowerShell terminal in Cursor.
 

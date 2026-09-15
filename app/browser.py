@@ -8,7 +8,7 @@ from playwright.sync_api import sync_playwright
 
 logger = logging.getLogger(__name__)
 
-DEBUG_URL = "http://localhost:9222"
+DEBUG_URL = f"http://localhost:{os.getenv('REMOTE_DEBUGGING_PORT', '9222')}"
 PORTAL_TITLE = "RetailerDashboard"
 WHATSAPP_TITLE = "WhatsApp"
 DEFAULT_WHATSAPP_URL = "https://web.whatsapp.com/"
