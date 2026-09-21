@@ -1,9 +1,14 @@
 import logging
 import re
 import os
+import time
 from contextlib import contextmanager
+from urllib.error import URLError
+from urllib.request import urlopen
 
 from playwright.sync_api import sync_playwright
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+from playwright.sync_api import Error as PlaywrightError
 
 
 logger = logging.getLogger(__name__)
@@ -20,9 +25,40 @@ WHATSAPP_MESSAGE_TIMEOUT_MS = 10000
 WHATSAPP_MENTION_TIMEOUT_MS = 5000
 
 CDP_CONNECT_TIMEOUT_MS = 30000
+CDP_HEALTH_CHECK_TIMEOUT_SECONDS = 3
 
 PORTAL_RELOAD_TIMEOUT_MS = 30000
 PORTAL_BALANCE_TIMEOUT_MS = 10000
+
+
+def cdp_endpoint_is_ready(port, timeout_seconds=CDP_HEALTH_CHECK_TIMEOUT_SECONDS):
+    """Return True only when Chrome's DevTools HTTP endpoint responds."""
+    endpoint = f"http://127.0.0.1:{port}/json/version"
+
+    try:
+        with urlopen(endpoint, timeout=timeout_seconds) as response:
+            return response.status == 200
+    except (OSError, URLError):
+        return False
+
+
+def wait_for_cdp_endpoint(port, timeout_seconds=30, poll_seconds=1):
+    """Wait for the DevTools endpoint before attempting a CDP connection."""
+    deadline = time.monotonic() + timeout_seconds
+
+    while time.monotonic() < deadline:
+        if cdp_endpoint_is_ready(port):
+            logger.info("Chrome DevTools endpoint is ready on port %s", port)
+            return True
+
+        time.sleep(poll_seconds)
+
+    logger.error(
+        "Chrome DevTools endpoint did not become ready on port %s within %s seconds",
+        port,
+        timeout_seconds,
+    )
+    return False
 
 
 def _find_page(pages, title_fragment, url_fragment=None):
@@ -126,6 +162,8 @@ def reconnect_browser():
         "Attempting to reconnect to browser session"
     )
 
+    p = None
+
     try:
         p = sync_playwright().start()
 
@@ -159,10 +197,11 @@ def reconnect_browser():
             "Failed to reconnect to browser"
         )
 
-        try:
-            p.stop()
-        except Exception:
-            pass
+        if p is not None:
+            try:
+                p.stop()
+            except Exception:
+                pass
 
         return None, None
 
@@ -307,17 +346,14 @@ def _insert_everyone_mention(
 
 @contextmanager
 def open_browser_session():
-    with sync_playwright() as p:
+    p = None
+
+    try:
+        p = sync_playwright().start()
 
         # Read the CDP port dynamically from the environment.
-        debug_port = os.getenv(
-            "REMOTE_DEBUGGING_PORT",
-            "9222",
-        )
-
-        debug_url = (
-            f"http://localhost:{debug_port}"
-        )
+        debug_port = os.getenv("REMOTE_DEBUGGING_PORT", "9222")
+        debug_url = f"http://127.0.0.1:{debug_port}"
 
         logger.info(
             "Connecting to the existing browser session: %s",
@@ -329,28 +365,23 @@ def open_browser_session():
             timeout=CDP_CONNECT_TIMEOUT_MS,
         )
 
-        try:
-            logger.info(
-                "Connected to browser successfully"
-            )
+        logger.info("Connected to browser successfully")
+        yield browser
 
-            yield browser
+    except Exception:
+        logger.exception("Browser session encountered an error")
+        raise
 
-        except Exception:
-            logger.exception(
-                "Browser session encountered an error"
-            )
-            raise
-
-        finally:
-            logger.info(
-                "Closing browser session connection"
-            )
-
+    finally:
+        # Do not call browser.close(): this is an attachment to Chrome, not a
+        # browser launched by Playwright. Stopping Playwright only disconnects
+        # this client and leaves the dedicated Chrome profile running.
+        if p is not None:
+            logger.info("Disconnecting Playwright from browser session")
             try:
-                browser.close()
+                p.stop()
             except Exception:
-                pass
+                logger.exception("Failed to stop Playwright cleanly")
 
 def ensure_browser_connection(browser):
     """
@@ -439,11 +470,30 @@ def _read_portal_balance(portal_page):
     return balance
 
 
+def _close_portal_page(portal_page):
+    """Close only an unusable portal tab before opening a clean replacement."""
+    if portal_page is None:
+        return
+
+    try:
+        portal_page.close(run_before_unload=False)
+        logger.info("Closed unusable portal tab before replacement")
+    except Exception:
+        logger.exception("Unable to close unusable portal tab")
+
+
 def get_portal_balance(browser):
     context = _get_context(browser)
 
     if context is None:
-        return None
+        logger.error(
+            "Browser context is unavailable. "
+            "The browser/CDP session may have been closed."
+        )
+
+        raise RuntimeError(
+            "Browser context is no longer available"
+        )
 
     portal_url = os.getenv(
         "PORTAL_URL"
@@ -614,7 +664,8 @@ def get_portal_balance(browser):
 
     # ---------------------------------------------------------
     # Attempt 4
-    # Re-open portal
+    # Replace the portal tab. A tab that only responds after a person clicks
+    # it can remain stuck through reload() and goto(), so reuse is unsafe.
     # ---------------------------------------------------------
 
     if portal_url:
@@ -630,27 +681,11 @@ def get_portal_balance(browser):
                 portal_url,
             )
 
-            if portal_page is None:
+            _close_portal_page(portal_page)
 
-                logger.info(
-                    "Portal tab is no longer available. "
-                    "Opening a new portal tab."
-                )
-
-                portal_page = _open_page(
-                    context,
-                    portal_url,
-                )
-
-            else:
-
-                portal_page.bring_to_front()
-
-                portal_page.goto(
-                    portal_url,
-                    wait_until="domcontentloaded",
-                    timeout=PORTAL_RELOAD_TIMEOUT_MS,
-                )
+            logger.info("Opening a clean portal replacement tab")
+            portal_page = _open_page(context, portal_url)
+            portal_page.bring_to_front()
 
             logger.info(
                 "Portal re-opened successfully"
@@ -684,12 +719,12 @@ def get_portal_balance(browser):
 
     logger.error(
         "All portal recovery attempts failed. "
-        "Balance could not be retrieved. "
-        "The application will continue and retry "
-        "on the next scheduled check."
+        "The browser session may have been closed."
     )
 
-    return None
+    raise RuntimeError(
+        "Browser session is no longer available"
+    )
 
 
 def send_whatsapp_message(

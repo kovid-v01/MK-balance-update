@@ -17,6 +17,7 @@ from browser import (
     open_browser_session,
     send_whatsapp_message,
     send_whatsapp_current_chat_message,
+    wait_for_cdp_endpoint,
 )
 
 from decision_engine import (
@@ -61,6 +62,8 @@ DEFAULT_GROUP_NAME = "Mewar 🤝Vananam MK LIMIT"
 DEFAULT_CHECK_INTERVAL_SECONDS = 300
 
 DEFAULT_REMOTE_DEBUGGING_PORT = 9222
+CDP_STARTUP_TIMEOUT_SECONDS = 30
+MAX_CONSECUTIVE_BROWSER_FAILURES = 2
 
 
 DEFAULT_CHROME_PATH = (
@@ -322,11 +325,42 @@ def _launch_browser(browser_name):
         [
             browser_path,
             f"--remote-debugging-port={port}",
+            "--remote-debugging-address=127.0.0.1",
             f"--user-data-dir={user_data_dir}",
+            "--disable-background-timer-throttling",
+            "--disable-renderer-backgrounding",
         ],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
+
+
+def _stop_owned_browser(browser_process, logger):
+    """Stop only the Chrome process started by this application."""
+    if browser_process is None or browser_process.poll() is not None:
+        return
+
+    logger.warning(
+        "Stopping the app-owned browser process (PID %s) for recovery",
+        browser_process.pid,
+    )
+
+    browser_process.terminate()
+
+    try:
+        browser_process.wait(timeout=15)
+    except subprocess.TimeoutExpired:
+        logger.warning("Browser did not exit gracefully; terminating it forcefully")
+        browser_process.kill()
+        browser_process.wait(timeout=10)
+
+
+def _restart_owned_browser(browser_name, browser_process, logger):
+    """Restart the dedicated browser after repeated CDP or portal failures."""
+    _stop_owned_browser(browser_process, logger)
+
+    logger.warning("Restarting app-owned %s browser for automatic recovery", browser_name)
+    return _launch_browser(browser_name)
 
 
 # ============================================================
@@ -430,7 +464,7 @@ def main():
     browser_name = (
         sys.argv[1]
         if len(sys.argv) > 1
-        else "existing"
+        else "chrome"
     )
 
     browser_name = browser_name.lower()
@@ -502,28 +536,33 @@ def main():
     # Browser monitoring / reconnect loop
     # --------------------------------------------------------
 
-    while True:
+    debug_port = os.getenv(
+        "REMOTE_DEBUGGING_PORT",
+        str(DEFAULT_REMOTE_DEBUGGING_PORT),
+    )
+    browser_process = _launch_browser(browser_name)
+    consecutive_browser_failures = 0
 
-        browser_process = None
+    while True:
 
         try:
 
-            # ------------------------------------------------
-            # Launch browser if required
-            # ------------------------------------------------
-
-            browser_process = _launch_browser(
-                browser_name
-            )
-
-            if browser_process is not None:
-
-                logger.info(
-                    "Waiting for browser remote "
-                    "debugging to become ready"
+            if (
+                browser_name != "existing"
+                and browser_process is not None
+                and browser_process.poll() is not None
+            ):
+                logger.warning(
+                    "The app-owned browser process exited unexpectedly; "
+                    "starting a replacement."
                 )
+                browser_process = _launch_browser(browser_name)
 
-                time.sleep(5)
+            if not wait_for_cdp_endpoint(
+                debug_port,
+                timeout_seconds=CDP_STARTUP_TIMEOUT_SECONDS,
+            ):
+                raise RuntimeError("Chrome DevTools endpoint is unavailable")
 
             # ------------------------------------------------
             # Connect to browser
@@ -538,6 +577,8 @@ def main():
                 logger.info(
                     "Browser session connected"
                 )
+                consecutive_browser_failures = 0
+                session_needs_recovery = False
 
                 # ------------------------------------------------
                 # Pre-open WhatsApp
@@ -586,6 +627,7 @@ def main():
                             "Closing current session and reconnecting."
                         )
 
+                        session_needs_recovery = True
                         break
 
                     if (
@@ -923,12 +965,36 @@ def main():
 
                         continue
 
+                if session_needs_recovery:
+                    raise RuntimeError(
+                        "Portal session could not be recovered"
+                    )
+
         except Exception:
 
+            consecutive_browser_failures += 1
             logger.exception(
                 "Browser monitoring session failed. "
                 "Will reconnect."
             )
+
+            if (
+                browser_name != "existing"
+                and consecutive_browser_failures
+                >= MAX_CONSECUTIVE_BROWSER_FAILURES
+            ):
+                browser_process = _restart_owned_browser(
+                    browser_name,
+                    browser_process,
+                    logger,
+                )
+                consecutive_browser_failures = 0
+
+            elif browser_name == "existing":
+                logger.warning(
+                    "Existing-browser mode cannot safely restart Chrome. "
+                    "Use 'python app\\main.py chrome' for automatic recovery."
+                )
 
         # --------------------------------------------------------
         # Reconnect delay

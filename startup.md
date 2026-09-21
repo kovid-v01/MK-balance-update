@@ -64,7 +64,12 @@ git switch test-balance-logic
 
 ---
 
-## 6. Start a Chromium Browser in Remote Debugging Mode
+## 6. Start a Chromium Browser Manually (Optional)
+
+Normal operation should use `python app\main.py` (or `python app\main.py chrome`).
+The app starts and supervises its dedicated Chrome profile, including automatic
+recovery after repeated DevTools connection failures. Use the manual approach
+below only for troubleshooting or when explicitly using `existing` mode.
 
 Close all existing browser windows first if the chosen profile is already in use.
 
@@ -178,7 +183,10 @@ python app\main.py chrome
 ```
 
 Use `chrome` or `brave` to launch that browser with its own remote-debug profile.
-If you omit the argument, the app uses the already-running browser session.
+If you omit the argument, the app launches and supervises its dedicated Chrome
+profile. Use `python app\main.py existing` only when you intentionally want to
+attach to a browser you started yourself; that mode cannot restart Chrome
+automatically.
 
 Optional environment variables:
 
@@ -201,25 +209,15 @@ tab inside the same remote-debug browser session.
 
 # Quick Startup
 
-For normal daily startup, the main commands are:
+For normal daily startup, use one automation terminal. It starts and monitors
+the dedicated Chrome profile itself:
 
-### Terminal 1 — Browser
+### Do not start Chrome separately
 
-```powershell
-cd "C:\Users\Kovid Singh Parihar\Documents\My projects\MK balance\automation-platform-test"
+`main.py` launches Chrome automatically. Starting a second process against the
+same profile prevents reliable self-healing.
 
-.\.venv\Scripts\Activate.ps1
-
-$env:CHROME_BROWSER_PATH = "C:\Program Files\Google\Chrome\Application\chrome.exe"
-# Or set Brave instead:
-# $env:BRAVE_BROWSER_PATH = "C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe"
-& $env:CHROME_BROWSER_PATH --remote-debugging-port=9222 --user-data-dir="C:\chrome-debug-profile"
-
-# Or launch Brave instead:
-# & $env:BRAVE_BROWSER_PATH --remote-debugging-port=9222 --user-data-dir="C:\brave-debug-profile"
-```
-
-### Terminal 2 — Automation
+### Automation
 
 ```powershell
 cd "C:\Users\Kovid Singh Parihar\Documents\My projects\MK balance\automation-platform-test"
@@ -230,11 +228,14 @@ git status
 
 git branch
 
-python app\main.py chrome
+python app\main.py
 
-# Or use Brave:
+# Or use Brave with its own dedicated profile:
 # python app\main.py brave
 ```
+
+On the first run, sign in to the retailer portal and WhatsApp Web in the
+dedicated window. Later starts restore that same profile automatically.
 
 ---
 
