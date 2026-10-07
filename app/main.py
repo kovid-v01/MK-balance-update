@@ -12,6 +12,7 @@ from dotenv import load_dotenv
 
 
 from browser import (
+    cdp_endpoint_is_ready,
     ensure_whatsapp_tab_open,
     get_portal_balance,
     open_browser_session,
@@ -79,6 +80,9 @@ DEFAULT_BRAVE_PATH = (
 DEFAULT_CHROME_PROFILE_DIR = r"C:\chrome-debug-profile"
 
 DEFAULT_BRAVE_PROFILE_DIR = r"C:\brave-debug-profile"
+
+# SW_SHOWNOACTIVATE: show the window without making it the foreground window.
+SW_SHOWNOACTIVATE = 4
 
 
 SUPPORTED_BROWSER_NAMES = {
@@ -275,6 +279,74 @@ def _validate_browser_config(
     return True
 
 
+def _configured_debug_port():
+    return os.getenv(
+        "REMOTE_DEBUGGING_PORT",
+        str(DEFAULT_REMOTE_DEBUGGING_PORT),
+    )
+
+
+def _pids_listening_on_port(port):
+    """Return PIDs that are still listening on the Chrome DevTools port."""
+    port = str(port)
+    pids = set()
+
+    if os.name != "nt":
+        return pids
+
+    completed = subprocess.run(
+        ["netstat", "-ano", "-p", "tcp"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    pattern = re.compile(
+        rf":{re.escape(port)}\s+\S+\s+LISTENING\s+(\d+)",
+        re.IGNORECASE,
+    )
+
+    for line in completed.stdout.splitlines():
+        match = pattern.search(line)
+        if not match:
+            continue
+
+        pid = int(match.group(1))
+        if pid > 0:
+            pids.add(pid)
+
+    return pids
+
+
+def _kill_process_tree(pid, logger):
+    """Kill a Chrome process and every child it spawned."""
+    logger.warning("Closing disconnected browser process tree (PID %s)", pid)
+
+    if os.name == "nt":
+        subprocess.run(
+            ["taskkill", "/PID", str(pid), "/T", "/F"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        return
+
+    try:
+        os.kill(pid, 15)
+    except OSError:
+        pass
+
+
+def _wait_until_cdp_unavailable(port, timeout_seconds=20):
+    deadline = time.monotonic() + timeout_seconds
+
+    while time.monotonic() < deadline:
+        if not cdp_endpoint_is_ready(port):
+            return True
+        time.sleep(0.5)
+
+    return not cdp_endpoint_is_ready(port)
+
+
 def _launch_browser(browser_name):
     """
     Launch Chrome or Brave with remote debugging enabled.
@@ -321,6 +393,17 @@ def _launch_browser(browser_name):
         user_data_dir,
     )
 
+    launch_kwargs = {
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+    }
+
+    if os.name == "nt":
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        startupinfo.wShowWindow = SW_SHOWNOACTIVATE
+        launch_kwargs["startupinfo"] = startupinfo
+
     return subprocess.Popen(
         [
             browser_path,
@@ -329,37 +412,82 @@ def _launch_browser(browser_name):
             f"--user-data-dir={user_data_dir}",
             "--disable-background-timer-throttling",
             "--disable-renderer-backgrounding",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--disable-session-crashed-bubble",
+            "--hide-crash-restore-bubble",
         ],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        **launch_kwargs,
     )
 
 
-def _stop_owned_browser(browser_process, logger):
-    """Stop only the Chrome process started by this application."""
-    if browser_process is None or browser_process.poll() is not None:
+def _stop_owned_browser(browser_process, logger, port=None):
+    """Close disconnected Chrome windows before a replacement is launched."""
+    port = port or _configured_debug_port()
+    pids = set()
+
+    if browser_process is not None and browser_process.poll() is None:
+        pids.add(browser_process.pid)
+
+    pids.update(_pids_listening_on_port(port))
+
+    if not pids:
+        logger.info("No disconnected browser window is still running")
         return
 
     logger.warning(
-        "Stopping the app-owned browser process (PID %s) for recovery",
-        browser_process.pid,
+        "Closing disconnected browser window(s) before opening a replacement"
     )
 
-    browser_process.terminate()
+    if browser_process is not None and browser_process.poll() is None:
+        browser_process.terminate()
+        try:
+            browser_process.wait(timeout=8)
+        except subprocess.TimeoutExpired:
+            logger.warning("Browser did not exit gracefully; closing it forcefully")
 
-    try:
-        browser_process.wait(timeout=15)
-    except subprocess.TimeoutExpired:
-        logger.warning("Browser did not exit gracefully; terminating it forcefully")
-        browser_process.kill()
-        browser_process.wait(timeout=10)
+    for pid in sorted(pids):
+        if browser_process is not None and pid == browser_process.pid:
+            if browser_process.poll() is not None:
+                continue
+        _kill_process_tree(pid, logger)
+
+    leftover_pids = _pids_listening_on_port(port)
+    for pid in leftover_pids:
+        _kill_process_tree(pid, logger)
+
+    if not _wait_until_cdp_unavailable(port):
+        logger.warning(
+            "DevTools port %s is still busy after closing the disconnected window",
+            port,
+        )
+
+
+def _ensure_owned_browser(browser_name, browser_process, logger):
+    """Keep a single owned browser window. Never launch a second copy."""
+    if browser_name == "existing":
+        return browser_process
+
+    port = _configured_debug_port()
+
+    if cdp_endpoint_is_ready(port):
+        logger.info(
+            "Browser connection is available; not opening another window"
+        )
+        return browser_process
+
+    logger.warning(
+        "Browser connection is not available. "
+        "Closing the disconnected window, then opening one replacement."
+    )
+    _stop_owned_browser(browser_process, logger, port=port)
+    return _launch_browser(browser_name)
 
 
 def _restart_owned_browser(browser_name, browser_process, logger):
-    """Restart the dedicated browser after repeated CDP or portal failures."""
-    _stop_owned_browser(browser_process, logger)
-
+    """Restart the dedicated browser after a lost connection."""
     logger.warning("Restarting app-owned %s browser for automatic recovery", browser_name)
+    _stop_owned_browser(browser_process, logger)
     return _launch_browser(browser_name)
 
 
@@ -536,33 +664,46 @@ def main():
     # Browser monitoring / reconnect loop
     # --------------------------------------------------------
 
-    debug_port = os.getenv(
-        "REMOTE_DEBUGGING_PORT",
-        str(DEFAULT_REMOTE_DEBUGGING_PORT),
-    )
-    browser_process = _launch_browser(browser_name)
+    debug_port = _configured_debug_port()
+    browser_process = None
     consecutive_browser_failures = 0
 
     while True:
 
         try:
 
-            if (
-                browser_name != "existing"
-                and browser_process is not None
-                and browser_process.poll() is not None
-            ):
-                logger.warning(
-                    "The app-owned browser process exited unexpectedly; "
-                    "starting a replacement."
+            if browser_name != "existing":
+                browser_process = _ensure_owned_browser(
+                    browser_name,
+                    browser_process,
+                    logger,
                 )
-                browser_process = _launch_browser(browser_name)
 
             if not wait_for_cdp_endpoint(
                 debug_port,
                 timeout_seconds=CDP_STARTUP_TIMEOUT_SECONDS,
             ):
-                raise RuntimeError("Chrome DevTools endpoint is unavailable")
+                if browser_name != "existing":
+                    logger.warning(
+                        "DevTools connection did not recover. "
+                        "Closing leftover windows and opening one replacement."
+                    )
+                    browser_process = _restart_owned_browser(
+                        browser_name,
+                        browser_process,
+                        logger,
+                    )
+                    if not wait_for_cdp_endpoint(
+                        debug_port,
+                        timeout_seconds=CDP_STARTUP_TIMEOUT_SECONDS,
+                    ):
+                        raise RuntimeError(
+                            "Chrome DevTools endpoint is unavailable"
+                        )
+                else:
+                    raise RuntimeError(
+                        "Chrome DevTools endpoint is unavailable"
+                    )
 
             # ------------------------------------------------
             # Connect to browser
@@ -978,23 +1119,32 @@ def main():
                 "Will reconnect."
             )
 
-            if (
-                browser_name != "existing"
-                and consecutive_browser_failures
-                >= MAX_CONSECUTIVE_BROWSER_FAILURES
-            ):
+            if browser_name == "existing":
+                logger.warning(
+                    "Existing-browser mode cannot safely restart Chrome. "
+                    "Use 'python app\\main.py chrome' for automatic recovery."
+                )
+
+            elif not cdp_endpoint_is_ready(debug_port):
+                logger.warning(
+                    "Connection is gone. Closing the disconnected window "
+                    "before the next launch."
+                )
+                _stop_owned_browser(
+                    browser_process,
+                    logger,
+                    port=debug_port,
+                )
+                browser_process = None
+                consecutive_browser_failures = 0
+
+            elif consecutive_browser_failures >= MAX_CONSECUTIVE_BROWSER_FAILURES:
                 browser_process = _restart_owned_browser(
                     browser_name,
                     browser_process,
                     logger,
                 )
                 consecutive_browser_failures = 0
-
-            elif browser_name == "existing":
-                logger.warning(
-                    "Existing-browser mode cannot safely restart Chrome. "
-                    "Use 'python app\\main.py chrome' for automatic recovery."
-                )
 
         # --------------------------------------------------------
         # Reconnect delay

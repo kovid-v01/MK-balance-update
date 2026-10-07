@@ -40,15 +40,21 @@ class CdpEndpointTests(unittest.TestCase):
 
 
 class OwnedBrowserRecoveryTests(unittest.TestCase):
-    def test_stop_owned_browser_terminates_running_process(self):
+    @patch("main._wait_until_cdp_unavailable", return_value=True)
+    @patch("main._pids_listening_on_port", return_value=set())
+    def test_stop_owned_browser_closes_running_process(self, _pids, _wait):
         process = MagicMock()
-        process.poll.return_value = None
+        process.pid = 4321
+        process._alive = True
+        process.poll.side_effect = lambda: None if process._alive else 1
+        process.terminate.side_effect = lambda: setattr(process, "_alive", False)
+        process.wait.side_effect = lambda timeout=None: setattr(process, "_alive", False)
         logger = MagicMock()
 
         main._stop_owned_browser(process, logger)
 
         process.terminate.assert_called_once_with()
-        process.wait.assert_called_once_with(timeout=15)
+        process.wait.assert_called_once_with(timeout=8)
 
     @patch("main._launch_browser")
     @patch("main._stop_owned_browser")
@@ -67,6 +73,79 @@ class OwnedBrowserRecoveryTests(unittest.TestCase):
         launch.assert_called_once_with("chrome")
         self.assertIs(result, replacement)
 
+    @patch("main._launch_browser")
+    @patch("main._stop_owned_browser")
+    @patch("main.cdp_endpoint_is_ready", return_value=True)
+    def test_ensure_does_not_open_another_window_when_connected(
+        self,
+        _ready,
+        stop,
+        launch,
+    ):
+        process = MagicMock()
+
+        result = main._ensure_owned_browser(
+            "chrome",
+            process,
+            MagicMock(),
+        )
+
+        stop.assert_not_called()
+        launch.assert_not_called()
+        self.assertIs(result, process)
+
+    @patch("main._launch_browser")
+    @patch("main._stop_owned_browser")
+    @patch("main.cdp_endpoint_is_ready", return_value=False)
+    def test_ensure_closes_disconnected_window_then_launches_one(
+        self,
+        _ready,
+        stop,
+        launch,
+    ):
+        process = MagicMock()
+        replacement = MagicMock()
+        launch.return_value = replacement
+
+        result = main._ensure_owned_browser(
+            "chrome",
+            process,
+            MagicMock(),
+        )
+
+        stop.assert_called_once()
+        launch.assert_called_once_with("chrome")
+        self.assertIs(result, replacement)
+
+    @patch("main.subprocess.run")
+    def test_pids_listening_on_port_parses_netstat(self, run):
+        run.return_value = MagicMock(
+            stdout=(
+                "TCP    127.0.0.1:9222         0.0.0.0:0              LISTENING       5678\n"
+            )
+        )
+
+        self.assertEqual(main._pids_listening_on_port(9222), {5678})
+
+
+class BrowserLaunchFocusTests(unittest.TestCase):
+    @patch("main.subprocess.Popen")
+    @patch("main._validate_browser_config", return_value=True)
+    @patch("main._browser_config")
+    def test_launch_browser_does_not_activate_window(self, config, _validate, popen):
+        config.return_value = {
+            "path": r"C:\chrome.exe",
+            "user_data_dir": r"C:\profile",
+        }
+        process = MagicMock()
+        popen.return_value = process
+
+        result = main._launch_browser("chrome")
+
+        self.assertIs(result, process)
+        startupinfo = popen.call_args.kwargs["startupinfo"]
+        self.assertEqual(startupinfo.wShowWindow, main.SW_SHOWNOACTIVATE)
+
 
 class PortalReplacementTests(unittest.TestCase):
     def test_close_portal_page_closes_only_the_page(self):
@@ -75,6 +154,35 @@ class PortalReplacementTests(unittest.TestCase):
         browser._close_portal_page(portal_page)
 
         portal_page.close.assert_called_once_with(run_before_unload=False)
+
+    def test_open_page_reuses_a_blank_tab_instead_of_a_new_window(self):
+        blank = MagicMock()
+        blank.title.return_value = "New Tab"
+        blank.url = "about:blank"
+        context = MagicMock()
+        context.pages = [blank]
+
+        result = browser._open_page(context, "https://portal.example/")
+
+        blank.goto.assert_called_once()
+        context.new_page.assert_not_called()
+        self.assertIs(result, blank)
+
+    def test_close_unusable_pages_closes_disconnected_tabs(self):
+        dead = MagicMock()
+        dead.title.side_effect = Exception("disconnected")
+        live = MagicMock()
+        live.title.return_value = "WhatsApp"
+        live.url = "https://web.whatsapp.com/"
+        context = MagicMock()
+        context.pages = [dead, live]
+        connected_browser = MagicMock()
+        connected_browser.contexts = [context]
+
+        browser.close_unusable_pages(connected_browser)
+
+        dead.close.assert_called_once_with(run_before_unload=False)
+        live.close.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -77,7 +77,81 @@ def _find_page(pages, title_fragment, url_fragment=None):
     return None
 
 
+def _is_blank_url(url):
+    current = (url or "").strip().lower()
+    return (
+        current in ("", "about:blank")
+        or current.startswith("chrome://newtab")
+        or current.startswith("chrome://new-tab-page")
+        or current.startswith("edge://newtab")
+    )
+
+
+def _page_is_usable(page):
+    try:
+        _ = page.title()
+        _ = page.url
+        return True
+    except Exception:
+        return False
+
+
+def _close_page_quietly(page, reason):
+    if page is None:
+        return
+
+    try:
+        page.close(run_before_unload=False)
+        logger.info("%s", reason)
+    except Exception:
+        logger.exception("Unable to close a disconnected browser tab/window")
+
+
+def close_unusable_pages(browser):
+    """Close tabs/windows that no longer have a live connection."""
+    context = _get_context(browser)
+
+    if context is None:
+        return
+
+    for page in list(context.pages):
+        if not _page_is_usable(page):
+            _close_page_quietly(
+                page,
+                "Closed a disconnected browser tab/window",
+            )
+
+
 def _open_page(context, url):
+    for page in list(context.pages):
+        if not _page_is_usable(page):
+            _close_page_quietly(
+                page,
+                "Closed a disconnected browser tab/window before replacement",
+            )
+            continue
+
+        try:
+            current_url = page.url
+        except Exception:
+            _close_page_quietly(
+                page,
+                "Closed a disconnected browser tab/window before replacement",
+            )
+            continue
+
+        if _is_blank_url(current_url):
+            logger.info(
+                "Reusing an existing browser tab instead of opening a new window"
+            )
+            page.goto(
+                url,
+                wait_until="domcontentloaded",
+                timeout=PORTAL_RELOAD_TIMEOUT_MS,
+            )
+            return page
+
+    logger.info("Opening a replacement tab in the current browser window")
     page = context.new_page()
 
     page.goto(
@@ -100,6 +174,55 @@ def _first_existing_locator(page, selectors):
             continue
 
     return None
+
+
+def _click_without_raising_window(locator):
+    """Click in the page DOM so Windows does not activate Chrome."""
+    locator.evaluate("element => element.click()")
+
+
+def _focus_without_raising_window(locator):
+    """Focus an element in the page without raising the Chrome window."""
+    locator.evaluate("element => element.focus()")
+
+
+def _insert_text_without_raising_window(locator, text):
+    """Insert text in-page without raising the Chrome window."""
+    locator.evaluate(
+        """(element, value) => {
+            element.focus();
+            document.execCommand('insertText', false, value);
+        }""",
+        text,
+    )
+
+
+def _press_enter_without_raising_window(locator):
+    """Send Enter from the page so Chrome does not steal OS focus."""
+    locator.evaluate(
+        """element => {
+            element.dispatchEvent(
+                new KeyboardEvent('keydown', {
+                    key: 'Enter',
+                    code: 'Enter',
+                    keyCode: 13,
+                    which: 13,
+                    bubbles: true,
+                    cancelable: true,
+                })
+            );
+            element.dispatchEvent(
+                new KeyboardEvent('keyup', {
+                    key: 'Enter',
+                    code: 'Enter',
+                    keyCode: 13,
+                    which: 13,
+                    bubbles: true,
+                    cancelable: true,
+                })
+            );
+        }"""
+    )
 
 
 def _get_context(browser):
@@ -242,15 +365,6 @@ def _get_whatsapp_page(browser):
             return None
 
     logger.info("WhatsApp tab found")
-
-    try:
-        whatsapp_page.bring_to_front()
-
-    except Exception:
-        logger.exception(
-            "Failed to bring WhatsApp tab to front"
-        )
-
     return whatsapp_page
 
 
@@ -300,8 +414,8 @@ def _insert_everyone_mention(
             "Starting WhatsApp @all mention insertion"
         )
 
-        message_box.click()
-        message_box.type("@")
+        _focus_without_raising_window(message_box)
+        _insert_text_without_raising_window(message_box, "@")
 
         logger.info(
             "Typed @, waiting for mention suggestions"
@@ -323,7 +437,7 @@ def _insert_everyone_mention(
             "Found WhatsApp 'Mention all members in this chat' option"
         )
 
-        mention_option.click()
+        _click_without_raising_window(mention_option)
 
         logger.info(
             "Clicked WhatsApp @all mention option"
@@ -418,6 +532,7 @@ def ensure_browser_connection(browser):
 
 
 def ensure_whatsapp_tab_open(browser):
+    close_unusable_pages(browser)
     logger.info(
         "Checking for WhatsApp tab"
     )
@@ -472,17 +587,14 @@ def _read_portal_balance(portal_page):
 
 def _close_portal_page(portal_page):
     """Close only an unusable portal tab before opening a clean replacement."""
-    if portal_page is None:
-        return
-
-    try:
-        portal_page.close(run_before_unload=False)
-        logger.info("Closed unusable portal tab before replacement")
-    except Exception:
-        logger.exception("Unable to close unusable portal tab")
+    _close_page_quietly(
+        portal_page,
+        "Closed unusable portal tab before replacement",
+    )
 
 
 def get_portal_balance(browser):
+    close_unusable_pages(browser)
     context = _get_context(browser)
 
     if context is None:
@@ -516,8 +628,6 @@ def get_portal_balance(browser):
                 "Portal recovery attempt 1: "
                 "refreshing existing portal tab"
             )
-
-            portal_page.bring_to_front()
 
             portal_page.reload(
                 wait_until="domcontentloaded",
@@ -567,8 +677,6 @@ def get_portal_balance(browser):
                 "Portal recovery attempt 2: "
                 "refreshing portal again"
             )
-
-            portal_page.bring_to_front()
 
             portal_page.reload(
                 wait_until="domcontentloaded",
@@ -621,8 +729,6 @@ def get_portal_balance(browser):
                     "Portal recovery attempt 3: "
                     "navigating directly to PORTAL_URL"
                 )
-
-                portal_page.bring_to_front()
 
                 portal_page.goto(
                     portal_url,
@@ -685,7 +791,6 @@ def get_portal_balance(browser):
 
             logger.info("Opening a clean portal replacement tab")
             portal_page = _open_page(context, portal_url)
-            portal_page.bring_to_front()
 
             logger.info(
                 "Portal re-opened successfully"
@@ -767,7 +872,7 @@ def send_whatsapp_message(
         )
         return False
 
-    search_box.click()
+    _focus_without_raising_window(search_box)
 
     try:
         search_box.fill(
@@ -775,13 +880,12 @@ def send_whatsapp_message(
         )
 
     except Exception:
-        search_box.type(
-            group_name
+        _insert_text_without_raising_window(
+            search_box,
+            group_name,
         )
 
-    whatsapp_page.keyboard.press(
-        "Enter"
-    )
+    _press_enter_without_raising_window(search_box)
 
     logger.info(
         "Searching for WhatsApp group: %s",
@@ -806,7 +910,7 @@ def send_whatsapp_message(
             group_name,
         )
 
-        chat_title.click()
+        _click_without_raising_window(chat_title)
 
         logger.info(
             "WhatsApp group opened successfully: %s",
@@ -868,7 +972,7 @@ def _send_message_to_current_chat(
     if message_box is None:
         return False
 
-    message_box.click()
+    _focus_without_raising_window(message_box)
 
     # ---------------------------------------------------------
     # Insert real @all mention
@@ -900,25 +1004,46 @@ def _send_message_to_current_chat(
     # ---------------------------------------------------------
 
     try:
-
-        message_box.type(
-            f"{message_prefix}{message}"
-        )
+        if mention_everyone:
+            # fill() would replace the @all mention chip.
+            _insert_text_without_raising_window(
+                message_box,
+                f"{message_prefix}{message}",
+            )
+        else:
+            message_box.fill(
+                f"{message_prefix}{message}"
+            )
 
     except Exception:
-        logger.exception(
-            "Failed to type WhatsApp message"
-        )
+        try:
+            _insert_text_without_raising_window(
+                message_box,
+                f"{message_prefix}{message}",
+            )
+        except Exception:
+            logger.exception(
+                "Failed to type WhatsApp message"
+            )
 
-        return False
+            return False
 
     # ---------------------------------------------------------
     # Send
     # ---------------------------------------------------------
 
-    whatsapp_page.keyboard.press(
-        "Enter"
+    send_button = _first_existing_locator(
+        whatsapp_page,
+        [
+            'button[aria-label="Send"]',
+            'span[data-icon="send"]',
+        ],
     )
+
+    if send_button is not None:
+        _click_without_raising_window(send_button)
+    else:
+        _press_enter_without_raising_window(message_box)
 
     logger.info(
         "WhatsApp message sent"

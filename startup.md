@@ -237,6 +237,47 @@ python app\main.py
 On the first run, sign in to the retailer portal and WhatsApp Web in the
 dedicated window. Later starts restore that same profile automatically.
 
+The automation no longer brings Chrome to the front on each check. You can
+leave the Chrome window behind other work, or minimize it.
+
+---
+
+# Run Without Cursor
+
+Cursor is only the editor. The automation is a normal Python process and does
+not need Cursor open after it has been started.
+
+Keep this computer signed in. Chrome still needs a real desktop session, so
+this cannot run as a hidden Windows service while nobody is logged in.
+
+## Option 1: Independent PowerShell window
+
+Close Cursor if you want. Open Windows PowerShell (not Cursor's terminal):
+
+```powershell
+cd "C:\Users\Kovid Singh Parihar\Documents\My projects\MK balance\automation-platform-test"
+.\.venv\Scripts\Activate.ps1
+python app\main.py
+```
+
+Minimize that PowerShell window. Leave it running. Logs still go to
+`logs\app.log`.
+
+Stop it by restoring that window and pressing `Ctrl + C`.
+
+## Option 2: Start at Windows logon (Task Scheduler)
+
+Create a task that runs only when you are logged on:
+
+* Program: `C:\Users\Kovid Singh Parihar\Documents\My projects\MK balance\automation-platform-test\.venv\Scripts\python.exe`
+* Arguments: `app\main.py`
+* Start in: `C:\Users\Kovid Singh Parihar\Documents\My projects\MK balance\automation-platform-test`
+* Trigger: At log on (your user account)
+* Run only when the user is logged on
+
+Do not choose "Run whether user is logged on or not". Chrome will not work
+correctly in that mode.
+
 ---
 
 # Stop the Automation
