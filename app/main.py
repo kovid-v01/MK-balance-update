@@ -581,9 +581,53 @@ def _clear_recovered_alerts(
 # MAIN APPLICATION
 # ============================================================
 
+_INSTANCE_LOCK_FILE = None
+
+
+def _acquire_instance_lock(logger):
+    """Prevent Task Scheduler from starting a second copy of this script."""
+    global _INSTANCE_LOCK_FILE
+
+    lock_path = Path("logs") / "automation.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_file = open(lock_path, "a+")
+
+    try:
+        if lock_file.tell() == 0:
+            lock_file.write("0")
+            lock_file.flush()
+        lock_file.seek(0)
+
+        if os.name == "nt":
+            import msvcrt
+
+            msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        lock_file.close()
+        logger.error(
+            "Another MK Balance automation process is already running. "
+            "Stop the extra copy in Task Scheduler or Task Manager, "
+            "then start only one."
+        )
+        return False
+
+    lock_file.write(str(os.getpid()))
+    lock_file.flush()
+    _INSTANCE_LOCK_FILE = lock_file
+    logger.info("Single-instance lock acquired")
+    return True
+
+
 def main():
 
     logger = logging.getLogger(__name__)
+
+    if not _acquire_instance_lock(logger):
+        sys.exit(1)
 
     # --------------------------------------------------------
     # Browser mode

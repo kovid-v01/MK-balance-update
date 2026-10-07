@@ -166,7 +166,33 @@ class PortalReplacementTests(unittest.TestCase):
 
         blank.goto.assert_called_once()
         context.new_page.assert_not_called()
+        context.new_cdp_session.assert_not_called()
         self.assertIs(result, blank)
+
+    def test_open_page_opens_a_tab_in_the_existing_window(self):
+        existing = MagicMock()
+        existing.title.return_value = "WhatsApp"
+        existing.url = "https://web.whatsapp.com/"
+        new_tab = MagicMock()
+        new_tab.url = "https://portal.example/"
+        context = MagicMock()
+        context.pages = [existing]
+        cdp = MagicMock()
+
+        def create_target(method, params):
+            context.pages = [existing, new_tab]
+            return {"targetId": "1"}
+
+        cdp.send.side_effect = create_target
+        context.new_cdp_session.return_value = cdp
+
+        result = browser._open_page(context, "https://portal.example/")
+
+        context.new_cdp_session.assert_called_once_with(existing)
+        cdp.send.assert_called_once()
+        self.assertEqual(cdp.send.call_args.args[1]["newWindow"], False)
+        context.new_page.assert_not_called()
+        self.assertIs(result, new_tab)
 
     def test_close_unusable_pages_closes_disconnected_tabs(self):
         dead = MagicMock()

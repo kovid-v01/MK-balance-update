@@ -128,19 +128,66 @@ def _close_page_quietly(page, reason):
         logger.exception("Unable to close a disconnected browser tab/window")
 
 
+def _iter_pages(browser):
+    try:
+        for context in browser.contexts:
+            for page in list(context.pages):
+                yield page
+    except Exception:
+        logger.exception("Unable to list browser pages")
+
+
 def close_unusable_pages(browser):
     """Close tabs/windows that no longer have a live connection."""
-    context = _get_context(browser)
-
-    if context is None:
-        return
-
-    for page in list(context.pages):
+    for page in list(_iter_pages(browser)):
         if not _page_is_usable(page):
             _close_page_quietly(
                 page,
                 "Closed a disconnected browser tab/window",
             )
+
+
+def _open_tab_in_same_window(context, url):
+    """Open a tab in the current Chrome window. Playwright new_page() opens a window."""
+    source_page = None
+    for page in list(context.pages):
+        if _page_is_usable(page):
+            source_page = page
+            break
+
+    if source_page is None:
+        return None
+
+    existing_ids = {id(page) for page in context.pages}
+
+    try:
+        cdp = context.new_cdp_session(source_page)
+        cdp.send(
+            "Target.createTarget",
+            {
+                "url": url,
+                "newWindow": False,
+                "background": True,
+            },
+        )
+    except Exception:
+        logger.exception(
+            "Could not open a tab in the existing Chrome window"
+        )
+        return None
+
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
+        for page in context.pages:
+            if id(page) not in existing_ids:
+                logger.info(
+                    "Opened a tab in the existing Chrome window"
+                )
+                return page
+        time.sleep(0.2)
+
+    logger.warning("A same-window tab was requested but did not appear")
+    return None
 
 
 def _open_page(context, url):
@@ -172,7 +219,13 @@ def _open_page(context, url):
             )
             return page
 
-    logger.info("Opening a replacement tab in the current browser window")
+    same_window_tab = _open_tab_in_same_window(context, url)
+    if same_window_tab is not None:
+        return same_window_tab
+
+    logger.warning(
+        "Falling back to Playwright new_page(); this may open a separate window"
+    )
     page = context.new_page()
 
     page.goto(
@@ -374,26 +427,48 @@ def reconnect_browser():
 
         return None, None
 
+def _preferred_context(browser):
+    """Use the window that already has WhatsApp or the portal, if one exists."""
+    whatsapp_url = os.getenv(
+        "WHATSAPP_URL",
+        DEFAULT_WHATSAPP_URL,
+    )
+    existing = _find_page(
+        list(_iter_pages(browser)),
+        WHATSAPP_TITLE,
+        whatsapp_url,
+    )
+    if existing is not None:
+        return existing.context
+
+    portal = _find_page(
+        list(_iter_pages(browser)),
+        PORTAL_TITLE,
+        os.getenv("PORTAL_URL"),
+    )
+    if portal is not None:
+        return portal.context
+
+    return _get_context(browser)
+
+
 def _get_whatsapp_page(browser):
-    context = _get_context(browser)
-
-    if context is None:
-        return None
-
-    pages = context.pages
-
     whatsapp_url = os.getenv(
         "WHATSAPP_URL",
         DEFAULT_WHATSAPP_URL,
     )
 
     whatsapp_page = _find_page(
-        pages,
+        list(_iter_pages(browser)),
         WHATSAPP_TITLE,
         whatsapp_url,
     )
 
     if whatsapp_page is None:
+        context = _preferred_context(browser)
+
+        if context is None:
+            return None
         logger.info(
             "WhatsApp tab not found; opening WhatsApp URL"
         )
@@ -624,10 +699,10 @@ def ensure_whatsapp_tab_open(browser):
 
 
 def _find_portal_page(
-    context,
+    browser,
     portal_url,
 ):
-    pages = context.pages
+    pages = list(_iter_pages(browser))
 
     logger.info(
         "Found %s open tab(s)",
@@ -693,7 +768,7 @@ def get_portal_balance(browser):
     # ---------------------------------------------------------
 
     portal_page = _find_portal_page(
-        context,
+        browser,
         portal_url,
     )
 
@@ -742,7 +817,7 @@ def get_portal_balance(browser):
     # ---------------------------------------------------------
 
     portal_page = _find_portal_page(
-        context,
+        browser,
         portal_url,
     )
 
@@ -794,7 +869,7 @@ def get_portal_balance(browser):
     if portal_url:
 
         portal_page = _find_portal_page(
-            context,
+            browser,
             portal_url,
         )
 
@@ -859,14 +934,17 @@ def get_portal_balance(browser):
             )
 
             portal_page = _find_portal_page(
-                context,
+                browser,
                 portal_url,
             )
 
             _close_portal_page(portal_page)
 
             logger.info("Opening a clean portal replacement tab")
-            portal_page = _open_page(context, portal_url)
+            portal_page = _open_page(
+                _preferred_context(browser) or context,
+                portal_url,
+            )
 
             logger.info(
                 "Portal re-opened successfully"
