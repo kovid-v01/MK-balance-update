@@ -20,9 +20,30 @@ DEFAULT_WHATSAPP_URL = "https://web.whatsapp.com/"
 
 BALANCE_SELECTOR = ".balance-amount"
 
-WHATSAPP_SEARCH_TIMEOUT_MS = 15000
-WHATSAPP_MESSAGE_TIMEOUT_MS = 10000
+WHATSAPP_SEARCH_TIMEOUT_MS = 20000
+WHATSAPP_MESSAGE_TIMEOUT_MS = 15000
 WHATSAPP_MENTION_TIMEOUT_MS = 5000
+WHATSAPP_UI_TIMEOUT_MS = 30000
+
+WHATSAPP_SEARCH_SELECTORS = [
+    '[data-testid="chat-list-search-container"] input',
+    '#side input[data-tab="3"]',
+    '#side input[type="text"]',
+    '#side div[contenteditable="true"][data-tab="3"]',
+    '#side div[contenteditable="true"][aria-label="Search input textbox"]',
+    '#side div[contenteditable="true"]',
+    '#side div[role="textbox"]',
+]
+
+WHATSAPP_MESSAGE_SELECTORS = [
+    '#main footer [contenteditable="true"]',
+    'footer [contenteditable="true"]',
+    'footer [role="textbox"]',
+    'div[contenteditable="true"][aria-placeholder="Type a message"]',
+    'div[contenteditable="true"][data-tab="10"]',
+    'div[contenteditable="true"][aria-label*="message"]',
+    'div[aria-label*="Type a message"]',
+]
 
 CDP_CONNECT_TIMEOUT_MS = 30000
 CDP_HEALTH_CHECK_TIMEOUT_SECONDS = 3
@@ -172,6 +193,31 @@ def _first_existing_locator(page, selectors):
                 return locator
         except Exception:
             continue
+
+    return None
+
+
+def _wait_for_first_visible(page, selectors, timeout_ms):
+    """Wait for the first matching visible element instead of failing immediately."""
+    if not selectors:
+        return None
+
+    per_selector_timeout = max(1000, int(timeout_ms / len(selectors)))
+    deadline = time.monotonic() + (timeout_ms / 1000)
+
+    while time.monotonic() < deadline:
+        for selector in selectors:
+            locator = page.locator(selector).first
+            remaining_ms = max(200, int((deadline - time.monotonic()) * 1000))
+            try:
+                locator.wait_for(
+                    state="visible",
+                    timeout=min(per_selector_timeout, remaining_ms),
+                )
+                logger.info("Found visible element with selector: %s", selector)
+                return locator
+            except Exception:
+                continue
 
     return None
 
@@ -364,37 +410,67 @@ def _get_whatsapp_page(browser):
             )
             return None
 
+    if not _wait_for_whatsapp_ready(whatsapp_page):
+        return None
+
     logger.info("WhatsApp tab found")
     return whatsapp_page
 
 
-def _get_message_box(whatsapp_page):
-    message_box = _first_existing_locator(
+def _whatsapp_needs_login(whatsapp_page):
+    login_markers = [
+        'canvas[aria-label*="scan" i]',
+        '[data-testid="qrcode"]',
+        'div[aria-label*="QR code"]',
+        'text=Log in to WhatsApp Web',
+    ]
+
+    for selector in login_markers:
+        try:
+            if whatsapp_page.locator(selector).first.count() > 0:
+                return True
+        except Exception:
+            continue
+
+    return False
+
+
+def _wait_for_whatsapp_ready(whatsapp_page):
+    """Wait until WhatsApp Web has finished loading its chat UI."""
+    search_box = _wait_for_first_visible(
         whatsapp_page,
-        [
-            'footer [contenteditable="true"]',
-            'footer [role="textbox"]',
-            'div[contenteditable="true"][aria-label*="message"]',
-            'div[contenteditable="true"][data-tab="10"]',
-            'div[aria-label*="Type a message"]',
-        ],
+        WHATSAPP_SEARCH_SELECTORS,
+        WHATSAPP_UI_TIMEOUT_MS,
+    )
+
+    if search_box is not None:
+        return True
+
+    if _whatsapp_needs_login(whatsapp_page):
+        logger.error(
+            "WhatsApp Web is showing a login/QR screen. "
+            "Sign in in the dedicated Chrome window, then wait for the next cycle."
+        )
+        return False
+
+    logger.error(
+        "WhatsApp search box not found. "
+        "The WhatsApp tab may still be loading."
+    )
+    return False
+
+
+def _get_message_box(whatsapp_page):
+    message_box = _wait_for_first_visible(
+        whatsapp_page,
+        WHATSAPP_MESSAGE_SELECTORS,
+        WHATSAPP_MESSAGE_TIMEOUT_MS,
     )
 
     if message_box is None:
         logger.error(
-            "WhatsApp message box not found"
-        )
-        return None
-
-    try:
-        message_box.wait_for(
-            state="visible",
-            timeout=WHATSAPP_MESSAGE_TIMEOUT_MS,
-        )
-
-    except Exception:
-        logger.error(
-            "WhatsApp message box did not become visible"
+            "WhatsApp message box not found. "
+            "The group chat may not have opened."
         )
         return None
 
@@ -845,31 +921,21 @@ def send_whatsapp_message(
     if whatsapp_page is None:
         return False
 
-    search_box = _first_existing_locator(
+    search_box = _wait_for_first_visible(
         whatsapp_page,
-        [
-            'input[aria-label*="Search"]',
-            'div[contenteditable="true"][aria-label*="Search"]',
-            'div[role="textbox"][aria-label*="Search"]',
-        ],
+        WHATSAPP_SEARCH_SELECTORS,
+        WHATSAPP_SEARCH_TIMEOUT_MS,
     )
 
     if search_box is None:
-        logger.error(
-            "WhatsApp search box not found"
-        )
-        return False
-
-    try:
-        search_box.wait_for(
-            state="visible",
-            timeout=WHATSAPP_SEARCH_TIMEOUT_MS,
-        )
-
-    except Exception:
-        logger.error(
-            "WhatsApp search box did not become visible"
-        )
+        if _whatsapp_needs_login(whatsapp_page):
+            logger.error(
+                "WhatsApp search box not found because WhatsApp Web is not signed in"
+            )
+        else:
+            logger.error(
+                "WhatsApp search box not found"
+            )
         return False
 
     _focus_without_raising_window(search_box)
@@ -885,7 +951,13 @@ def send_whatsapp_message(
             group_name,
         )
 
-    _press_enter_without_raising_window(search_box)
+    try:
+        search_box.press("Enter")
+    except Exception:
+        logger.exception(
+            "WhatsApp search Enter via locator failed; trying in-page Enter"
+        )
+        _press_enter_without_raising_window(search_box)
 
     logger.info(
         "Searching for WhatsApp group: %s",

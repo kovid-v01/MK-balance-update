@@ -185,5 +185,26 @@ class PortalReplacementTests(unittest.TestCase):
         live.close.assert_not_called()
 
 
+class WhatsAppLocatorTests(unittest.TestCase):
+    def test_wait_for_first_visible_uses_the_first_ready_selector(self):
+        missing = MagicMock()
+        missing.wait_for.side_effect = Exception("not visible")
+        found = MagicMock()
+        missing_locator = MagicMock()
+        missing_locator.first = missing
+        found_locator = MagicMock()
+        found_locator.first = found
+        page = MagicMock()
+        page.locator.side_effect = [missing_locator, found_locator]
+
+        result = browser._wait_for_first_visible(
+            page,
+            ["#old", "#main footer [contenteditable=\"true\"]"],
+            2000,
+        )
+
+        self.assertIs(result, found)
+
+
 if __name__ == "__main__":
     unittest.main()
