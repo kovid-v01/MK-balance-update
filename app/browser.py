@@ -1138,6 +1138,35 @@ def get_portal_balance(browser):
     )
 
 
+def _whatsapp_group_is_open(whatsapp_page, group_name):
+    """True when the current WhatsApp conversation is already this group."""
+    try:
+        return bool(
+            whatsapp_page.evaluate(
+                """(groupName) => {
+                    const header = document.querySelector('#main header');
+                    if (!header) return false;
+
+                    const titles = Array.from(
+                        header.querySelectorAll('[title]')
+                    ).map((element) => element.getAttribute('title') || '');
+
+                    if (titles.includes(groupName)) {
+                        return true;
+                    }
+
+                    const firstLine = (header.innerText || '')
+                        .split('\\n')[0]
+                        .trim();
+                    return firstLine === groupName;
+                }""",
+                group_name,
+            )
+        )
+    except Exception:
+        return False
+
+
 def _open_whatsapp_group(browser, group_name):
     """Open the WhatsApp group chat. Returns the page or None."""
     whatsapp_page = _get_whatsapp_page(
@@ -1146,6 +1175,9 @@ def _open_whatsapp_group(browser, group_name):
 
     if whatsapp_page is None:
         return None
+
+    if _whatsapp_group_is_open(whatsapp_page, group_name):
+        return whatsapp_page
 
     search_box = _wait_for_first_visible(
         whatsapp_page,
