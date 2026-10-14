@@ -6,7 +6,7 @@ import time
 import logging
 import os
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta
 from playwright.sync_api import sync_playwright
 
 from dotenv import load_dotenv
@@ -54,8 +54,11 @@ load_dotenv(PROJECT_ROOT / ".env")
 
 LOG_DIR = Path("logs")
 LOG_DIR.mkdir(exist_ok=True)
+LOG_RETENTION_DAYS = 2
 
-LOG_FILE = LOG_DIR / "app.log"
+_LOG_FORMAT = "%(asctime)s | %(levelname)s | %(message)s"
+_file_log_handler = None
+_file_log_day = None
 
 
 # ============================================================
@@ -559,21 +562,98 @@ def _restart_owned_browser(browser_name, browser_process, logger):
 # LOGGING CONFIGURATION
 # ============================================================
 
-logging.basicConfig(
-    level=logging.INFO,
-    format=(
-        "%(asctime)s | "
-        "%(levelname)s | "
-        "%(message)s"
-    ),
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler(
-            LOG_FILE,
-            encoding="utf-8",
-        ),
-    ],
-)
+def _log_file_for_day(day, log_dir=None):
+    directory = log_dir or LOG_DIR
+    return directory / f"app-{day.isoformat()}.log"
+
+
+def _day_from_log_filename(name):
+    match = re.match(r"app-(\d{4}-\d{2}-\d{2})\.log$", name)
+    if not match:
+        return None
+    return datetime.strptime(match.group(1), "%Y-%m-%d").date()
+
+
+def _purge_old_log_files(
+    log_dir=None,
+    retention_days=LOG_RETENTION_DAYS,
+    now=None,
+):
+    """Delete log files older than the retention window."""
+    directory = Path(log_dir or LOG_DIR)
+    if not directory.exists():
+        return
+
+    now = now or datetime.now()
+    cutoff_date = now.date() - timedelta(days=retention_days)
+
+    for path in directory.iterdir():
+        if not path.is_file():
+            continue
+        if not (path.name.endswith(".log") or ".log." in path.name):
+            continue
+
+        try:
+            file_day = _day_from_log_filename(path.name)
+            if file_day is None:
+                file_day = datetime.fromtimestamp(path.stat().st_mtime).date()
+            if file_day < cutoff_date:
+                path.unlink()
+        except OSError:
+            logging.getLogger(__name__).exception(
+                "Failed to delete old log file"
+            )
+
+
+def _rotate_file_log_handler(now=None):
+    """Write to logs/app-YYYY-MM-DD.log and switch at midnight."""
+    global _file_log_handler, _file_log_day
+
+    today = (now or datetime.now()).date()
+    if _file_log_handler is not None and _file_log_day == today:
+        return
+
+    root = logging.getLogger()
+    formatter = logging.Formatter(_LOG_FORMAT)
+
+    if _file_log_handler is not None:
+        root.removeHandler(_file_log_handler)
+        _file_log_handler.close()
+
+    handler = logging.FileHandler(
+        _log_file_for_day(today),
+        encoding="utf-8",
+    )
+    handler.setFormatter(formatter)
+    root.addHandler(handler)
+    _file_log_handler = handler
+    _file_log_day = today
+
+
+def _maintain_log_files(now=None):
+    _rotate_file_log_handler(now=now)
+    _purge_old_log_files(now=now)
+
+
+def _configure_logging():
+    LOG_DIR.mkdir(exist_ok=True)
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+    formatter = logging.Formatter(_LOG_FORMAT)
+
+    if not any(
+        isinstance(handler, logging.StreamHandler)
+        and not isinstance(handler, logging.FileHandler)
+        for handler in root.handlers
+    ):
+        stream_handler = logging.StreamHandler()
+        stream_handler.setFormatter(formatter)
+        root.addHandler(stream_handler)
+
+    _maintain_log_files()
+
+
+_configure_logging()
 
 
 # ============================================================
@@ -868,6 +948,8 @@ def main():
 
                 while True:
 
+                    _maintain_log_files()
+
                     limit_requested = False
 
                     try:
@@ -931,8 +1013,7 @@ def main():
                         continue
 
                     logger.info(
-                        "Balance retrieved successfully: %s",
-                        balance,
+                        "Balance retrieved successfully"
                     )
                     next_portal_check_at = time.monotonic() + check_interval_seconds
 
@@ -944,10 +1025,10 @@ def main():
                         balance
                     )
 
-                    logger.info(
-                        "Parsed balance value: %s",
-                        balance_value,
-                    )
+                    if balance_value is None:
+                        logger.info("Balance could not be parsed")
+                    else:
+                        logger.info("Balance parsed successfully")
 
                     # =================================================
                     # 3. CLEAR RECOVERED ALERT MEMORY

@@ -952,8 +952,7 @@ def get_portal_balance(browser):
             )
 
             logger.info(
-                "Available balance: %s",
-                balance,
+                "Balance read from portal successfully"
             )
 
             return balance
@@ -1002,8 +1001,7 @@ def get_portal_balance(browser):
             )
 
             logger.info(
-                "Available balance: %s",
-                balance,
+                "Balance read from portal successfully"
             )
 
             return balance
@@ -1054,8 +1052,7 @@ def get_portal_balance(browser):
                 )
 
                 logger.info(
-                    "Available balance: %s",
-                    balance,
+                    "Balance read from portal successfully"
                 )
 
                 return balance
@@ -1113,8 +1110,7 @@ def get_portal_balance(browser):
             )
 
             logger.info(
-                "Available balance: %s",
-                balance,
+                "Balance read from portal successfully"
             )
 
             return balance

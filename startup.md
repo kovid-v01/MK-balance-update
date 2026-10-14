@@ -264,8 +264,9 @@ cd "C:\Users\Kovid Singh Parihar\Documents\My projects\MK balance\automation-pla
 python app\main.py
 ```
 
-Minimize that PowerShell window. Leave it running. Logs still go to
-`logs\app.log`.
+Minimize that PowerShell window. Leave it running. Logs go to dated files
+such as `logs\app-2026-10-14.log`. Files older than two days are deleted
+automatically. Balance amounts are not written to the logs.
 
 Stop it by restoring that window and pressing `Ctrl + C`.
 
