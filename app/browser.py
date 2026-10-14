@@ -35,6 +35,12 @@ WHATSAPP_SEARCH_SELECTORS = [
     '#side div[role="textbox"]',
 ]
 
+BALANCE_REQUEST_WORD = re.compile(r"\b(?:mk|limit)\b", re.IGNORECASE)
+OUR_BALANCE_POST = re.compile(
+    r"₹|rs\.?\s|balance is below|\bmk balance\b",
+    re.IGNORECASE,
+)
+
 WHATSAPP_MESSAGE_SELECTORS = [
     '#main footer [contenteditable="true"]',
     'footer [contenteditable="true"]',
@@ -1167,6 +1173,61 @@ def _whatsapp_group_is_open(whatsapp_page, group_name):
         return False
 
 
+def _clear_whatsapp_search(whatsapp_page):
+    """Close an active search so #main stays on the open chat."""
+    search_box = None
+    for selector in WHATSAPP_SEARCH_SELECTORS:
+        locator = whatsapp_page.locator(selector).first
+        try:
+            if locator.is_visible(timeout=400):
+                search_box = locator
+                break
+        except Exception:
+            continue
+
+    if search_box is None:
+        return
+
+    try:
+        current = (search_box.input_value() or "").strip()
+    except Exception:
+        try:
+            current = (search_box.inner_text() or "").strip()
+        except Exception:
+            current = ""
+
+    if not current:
+        return
+
+    try:
+        search_box.fill("")
+    except Exception:
+        pass
+
+    try:
+        whatsapp_page.keyboard.press("Escape")
+    except Exception:
+        pass
+
+
+def _is_limit_request_text(text, group_name=None):
+    """True when the message asks for a balance with MK or LIMIT."""
+    if not text or OUR_BALANCE_POST.search(text):
+        return False
+
+    if not BALANCE_REQUEST_WORD.search(text):
+        return False
+
+    if group_name:
+        if text.strip() == group_name.strip():
+            return False
+        remainder = text.replace(group_name, "")
+        if not BALANCE_REQUEST_WORD.search(remainder):
+            return False
+
+    return True
+
+
 def _open_whatsapp_group(browser, group_name):
     """Open the WhatsApp group chat. Returns the page or None."""
     whatsapp_page = _get_whatsapp_page(
@@ -1177,6 +1238,7 @@ def _open_whatsapp_group(browser, group_name):
         return None
 
     if _whatsapp_group_is_open(whatsapp_page, group_name):
+        _clear_whatsapp_search(whatsapp_page)
         return whatsapp_page
 
     search_box = _wait_for_first_visible(
@@ -1241,6 +1303,7 @@ def _open_whatsapp_group(browser, group_name):
         )
 
         chat_title.click(timeout=WHATSAPP_SEARCH_TIMEOUT_MS)
+        _clear_whatsapp_search(whatsapp_page)
         whatsapp_page.wait_for_timeout(800)
 
         logger.info(
@@ -1266,7 +1329,7 @@ def _read_recent_group_messages(whatsapp_page):
             """() => {
                 const nodes = Array.from(
                     document.querySelectorAll('#main div[data-id]')
-                ).slice(-30);
+                ).slice(-80);
 
                 return nodes.map((element, index) => {
                     const id = element.getAttribute('data-id') || `msg-${index}`;
@@ -1275,10 +1338,9 @@ def _read_recent_group_messages(whatsapp_page):
                             '[data-icon="msg-check"], [data-icon="msg-dblcheck"], [data-icon="msg-time"]'
                         ));
                     const textNode = element.querySelector(
-                        'span.selectable-text, span.copyable-text, .copyable-text'
+                        'span.selectable-text, span.copyable-text'
                     );
-                    const text = (textNode ? textNode.innerText : element.innerText || '')
-                        .trim();
+                    const text = (textNode ? textNode.innerText : '').trim();
 
                     return { id, outgoing, text };
                 });
@@ -1291,9 +1353,9 @@ def _read_recent_group_messages(whatsapp_page):
 
 def scan_limit_request(browser, group_name, last_seen_id=None):
     """
-    Look for a new incoming group message containing LIMIT.
+    Look for a new group message containing MK or LIMIT.
 
-    On first run (last_seen_id is None), the latest LIMIT is recorded
+    On first run (last_seen_id is None), the latest request is recorded
     but not treated as a new request so old chat history is not replayed.
 
     Returns:
@@ -1305,9 +1367,10 @@ def scan_limit_request(browser, group_name, last_seen_id=None):
         return False, last_seen_id
 
     messages = _read_recent_group_messages(whatsapp_page)
-    triggered, latest_id = _select_latest_incoming_limit(
+    triggered, latest_id = _select_latest_limit_request(
         messages,
         last_seen_id,
+        group_name,
     )
 
     if latest_id is None:
@@ -1321,31 +1384,31 @@ def scan_limit_request(browser, group_name, last_seen_id=None):
         return False, latest_id
 
     if triggered:
-        logger.info("New incoming WhatsApp LIMIT request: %s", latest_id)
+        logger.info("New incoming WhatsApp MK/LIMIT request: %s", latest_id)
 
     return triggered, latest_id
 
 
-def _select_latest_incoming_limit(messages, last_seen_id=None):
+def _select_latest_limit_request(messages, last_seen_id=None, group_name=None):
     """
-    Pick the newest incoming message containing LIMIT.
+    Pick the newest chat message that asks for a balance with MK or LIMIT.
 
-    Outgoing messages are ignored so our own copy cannot retrigger.
+    Outgoing requests are counted too, so a message typed in the same
+    WhatsApp Web session is not skipped. Our own balance posts are
+    ignored even if they contain MK.
+
+    The configured group title is ignored even if it contains MK or LIMIT.
 
     Returns:
         (triggered, latest_matching_id)
     """
     latest_limit_id = None
 
-    for message in reversed(messages or []):
+    for message in messages or []:
         text = (message or {}).get("text") or ""
-        if "limit" not in text.lower():
+        if not _is_limit_request_text(text, group_name):
             continue
-        if message.get("outgoing"):
-            continue
-
         latest_limit_id = message.get("id")
-        break
 
     if latest_limit_id is None:
         return False, last_seen_id

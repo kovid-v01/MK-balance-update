@@ -10,8 +10,8 @@ The project currently uses browser automation to:
 2. Open/find the retailer dashboard.
 3. Refresh and extract the current balance on a portal interval.
 4. Apply decision logic.
-5. Send WhatsApp only for a LIMIT request or a new 50 L / 30 L / 10 L alert.
-6. Poll the WhatsApp group for incoming LIMIT messages more often than the portal refresh.
+5. Send WhatsApp only for an MK/LIMIT request or a new 50 L / 30 L / 10 L alert.
+6. Poll the WhatsApp group for incoming MK or LIMIT messages more often than the portal refresh.
 
 ## Important Files
 
@@ -77,7 +77,7 @@ then:
 ### WhatsApp send rules
 
 * Do not send a routine balance on the portal schedule.
-* Send a normal balance only when a new incoming group message contains `LIMIT` (case-insensitive substring, not sent by us).
+* Send a normal balance only when a new group message contains `MK` or `LIMIT` as a whole word (case-insensitive). The group title itself does not count. Our own balance posts do not count even if they contain `MK`.
 * First time the balance drops below 50 L, 30 L, or 10 L, send the balance then an `@all` alert once. Persist that threshold only if the alert send succeeds. Clear it if the balance recovers so a later drop can alert again.
 * Do not put the word `LIMIT` in outbound WhatsApp copy.
 

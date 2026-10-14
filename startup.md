@@ -173,8 +173,8 @@ python app\main.py
 
 The script now runs continuously. By default it refreshes the portal about every
 5 minutes to watch 50 L / 30 L / 10 L alerts, and polls the WhatsApp group about
-every 20 seconds for an incoming `LIMIT` request. It does not send a routine
-balance on that portal interval. WhatsApp is used only for a LIMIT reply or a
+every 20 seconds for an incoming `MK` or `LIMIT` request. It does not send a routine
+balance on that portal interval. WhatsApp is used only for an MK/LIMIT reply or a
 new one-time threshold alert (balance, then `@all`). Balances below ₹2,000 are
 not posted.
 

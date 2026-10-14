@@ -111,7 +111,7 @@ def evaluate_balance(
             Threshold returned by get_alert_threshold().
 
         limit_requested:
-            Whether a WhatsApp group message containing LIMIT
+            Whether a WhatsApp group message containing MK or LIMIT
             asked for a one-off balance update.
 
     Returns:
@@ -206,7 +206,7 @@ def evaluate_balance(
         return Decision(
             action=Action.SEND_BALANCE,
             severity=Severity.NORMAL,
-            reason="Balance requested by a WhatsApp LIMIT message.",
+            reason="Balance requested by a WhatsApp MK/LIMIT message.",
             message=f"{label}: {balance_text}",
             mention_everyone=False,
         )
