@@ -147,18 +147,146 @@ def close_unusable_pages(browser):
             )
 
 
-def _open_tab_in_same_window(context, url):
+def _page_window_id(page):
+    try:
+        cdp = page.context.new_cdp_session(page)
+        result = cdp.send("Browser.getWindowForTarget", {})
+        window_id = result.get("windowId") if isinstance(result, dict) else None
+        if isinstance(window_id, int):
+            return window_id
+        return None
+    except Exception:
+        return None
+
+
+def _is_whatsapp_page(page):
+    try:
+        title = page.title()
+        url = page.url or ""
+    except Exception:
+        return False
+
+    return (
+        WHATSAPP_TITLE in title
+        or DEFAULT_WHATSAPP_URL.rstrip("/") in url
+    )
+
+
+def _is_portal_page(page):
+    try:
+        title = page.title()
+        url = page.url or ""
+    except Exception:
+        return False
+
+    portal_url = os.getenv("PORTAL_URL") or ""
+    return PORTAL_TITLE in title or (
+        portal_url and portal_url.split("#")[0] in url
+    )
+
+
+_MERGED_SEPARATE_WINDOWS = False
+
+
+def close_extra_browser_windows(browser):
+    """Keep one Chrome window so portal and WhatsApp stay as tabs together."""
+    global _MERGED_SEPARATE_WINDOWS
+    pages = [page for page in _iter_pages(browser) if _page_is_usable(page)]
+    if not pages:
+        return
+
+    whatsapp_page = next((page for page in pages if _is_whatsapp_page(page)), None)
+    portal_page = next((page for page in pages if _is_portal_page(page)), None)
+    home = whatsapp_page or portal_page or pages[0]
+    home_id = _page_window_id(home)
+
+    for page in pages:
+        if page is home or page is portal_page or page is whatsapp_page:
+            continue
+
+        if _is_blank_url(page.url):
+            _close_page_quietly(
+                page,
+                "Closed extra blank Chrome tab/window",
+            )
+            continue
+
+        window_id = _page_window_id(page)
+        if home_id is not None and window_id is not None and window_id != home_id:
+            _close_page_quietly(
+                page,
+                "Closed extra Chrome window so portal and WhatsApp stay together",
+            )
+
+    if whatsapp_page is None or portal_page is None or whatsapp_page is portal_page:
+        return
+
+    whatsapp_window = _page_window_id(whatsapp_page)
+    portal_window = _page_window_id(portal_page)
+    if (
+        whatsapp_window is not None
+        and portal_window is not None
+        and whatsapp_window == portal_window
+    ):
+        return
+
+    if (
+        (whatsapp_window is None or portal_window is None)
+        and _MERGED_SEPARATE_WINDOWS
+    ):
+        return
+
+    portal_url = os.getenv("PORTAL_URL") or portal_page.url
+    if not portal_url:
+        return
+
+    _MERGED_SEPARATE_WINDOWS = True
+    logger.warning(
+        "Portal and WhatsApp are in separate Chrome windows; "
+        "moving the portal into the WhatsApp window"
+    )
+    _close_page_quietly(
+        portal_page,
+        "Closed separate portal window",
+    )
+    _open_tab_in_same_window(
+        whatsapp_page.context,
+        portal_url,
+        whatsapp_page,
+    )
+
+
+def _wait_for_new_page(context, existing_ids, timeout_seconds=15):
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        for page in context.pages:
+            if id(page) not in existing_ids:
+                logger.info("Opened a tab in the existing Chrome window")
+                return page
+        time.sleep(0.2)
+    return None
+
+
+def _open_tab_in_same_window(context, url, source_page=None):
     """Open a tab in the current Chrome window. Playwright new_page() opens a window."""
-    source_page = None
-    for page in list(context.pages):
-        if _page_is_usable(page):
-            source_page = page
-            break
+    if source_page is None:
+        for page in list(context.pages):
+            if _page_is_usable(page):
+                source_page = page
+                break
 
     if source_page is None:
         return None
 
     existing_ids = {id(page) for page in context.pages}
+
+    try:
+        source_page.evaluate("openUrl => window.open(openUrl, '_blank')", url)
+        opened = _wait_for_new_page(context, existing_ids)
+        if opened is not None:
+            return opened
+    except Exception:
+        logger.exception("window.open could not add a tab in the current window")
 
     try:
         cdp = context.new_cdp_session(source_page)
@@ -176,65 +304,87 @@ def _open_tab_in_same_window(context, url):
         )
         return None
 
-    deadline = time.monotonic() + 15
-    while time.monotonic() < deadline:
-        for page in context.pages:
-            if id(page) not in existing_ids:
-                logger.info(
-                    "Opened a tab in the existing Chrome window"
-                )
-                return page
-        time.sleep(0.2)
-
-    logger.warning("A same-window tab was requested but did not appear")
-    return None
+    return _wait_for_new_page(context, existing_ids)
 
 
 def _open_page(context, url):
+    usable_pages = []
     for page in list(context.pages):
-        if not _page_is_usable(page):
+        if _page_is_usable(page):
+            usable_pages.append(page)
+        else:
             _close_page_quietly(
                 page,
                 "Closed a disconnected browser tab/window before replacement",
             )
+
+    source_page = None
+    for page in usable_pages:
+        try:
+            title = page.title()
+            current_url = page.url
+        except Exception:
             continue
 
+        if (
+            WHATSAPP_TITLE in title
+            or PORTAL_TITLE in title
+            or not _is_blank_url(current_url)
+        ):
+            source_page = page
+            break
+
+    if source_page is None and usable_pages:
+        source_page = usable_pages[0]
+
+    source_window = _page_window_id(source_page) if source_page is not None else None
+
+    for page in usable_pages:
         try:
             current_url = page.url
         except Exception:
-            _close_page_quietly(
-                page,
-                "Closed a disconnected browser tab/window before replacement",
-            )
             continue
 
-        if _is_blank_url(current_url):
-            logger.info(
-                "Reusing an existing browser tab instead of opening a new window"
-            )
-            page.goto(
-                url,
-                wait_until="domcontentloaded",
-                timeout=PORTAL_RELOAD_TIMEOUT_MS,
-            )
-            return page
+        if not _is_blank_url(current_url):
+            continue
 
-    same_window_tab = _open_tab_in_same_window(context, url)
+        page_window = _page_window_id(page)
+        if (
+            source_window is not None
+            and page_window is not None
+            and page_window != source_window
+        ):
+            continue
+
+        logger.info(
+            "Reusing an existing browser tab instead of opening a new window"
+        )
+        page.goto(
+            url,
+            wait_until="domcontentloaded",
+            timeout=PORTAL_RELOAD_TIMEOUT_MS,
+        )
+        return page
+
+    same_window_tab = _open_tab_in_same_window(context, url, source_page)
     if same_window_tab is not None:
         return same_window_tab
 
-    logger.warning(
-        "Falling back to Playwright new_page(); this may open a separate window"
-    )
-    page = context.new_page()
+    if not usable_pages:
+        logger.info("Opening the first Chrome tab")
+        page = context.new_page()
+        page.goto(
+            url,
+            wait_until="domcontentloaded",
+            timeout=PORTAL_RELOAD_TIMEOUT_MS,
+        )
+        return page
 
-    page.goto(
+    logger.error(
+        "Could not open %s as a tab in the existing Chrome window",
         url,
-        wait_until="domcontentloaded",
-        timeout=PORTAL_RELOAD_TIMEOUT_MS,
     )
-
-    return page
+    raise RuntimeError("Could not open a tab in the existing Chrome window")
 
 
 def _first_existing_locator(page, selectors):
@@ -684,6 +834,7 @@ def ensure_browser_connection(browser):
 
 def ensure_whatsapp_tab_open(browser):
     close_unusable_pages(browser)
+    close_extra_browser_windows(browser)
     logger.info(
         "Checking for WhatsApp tab"
     )
@@ -746,6 +897,7 @@ def _close_portal_page(portal_page):
 
 def get_portal_balance(browser):
     close_unusable_pages(browser)
+    close_extra_browser_windows(browser)
     context = _get_context(browser)
 
     if context is None:
@@ -986,18 +1138,14 @@ def get_portal_balance(browser):
     )
 
 
-def send_whatsapp_message(
-    browser,
-    group_name,
-    message,
-    mention_everyone=False,
-):
+def _open_whatsapp_group(browser, group_name):
+    """Open the WhatsApp group chat. Returns the page or None."""
     whatsapp_page = _get_whatsapp_page(
         browser
     )
 
     if whatsapp_page is None:
-        return False
+        return None
 
     search_box = _wait_for_first_visible(
         whatsapp_page,
@@ -1014,7 +1162,7 @@ def send_whatsapp_message(
             logger.error(
                 "WhatsApp search box not found"
             )
-        return False
+        return None
 
     _focus_without_raising_window(search_box)
 
@@ -1060,7 +1208,8 @@ def send_whatsapp_message(
             group_name,
         )
 
-        _click_without_raising_window(chat_title)
+        chat_title.click(timeout=WHATSAPP_SEARCH_TIMEOUT_MS)
+        whatsapp_page.wait_for_timeout(800)
 
         logger.info(
             "WhatsApp group opened successfully: %s",
@@ -1073,6 +1222,117 @@ def send_whatsapp_message(
             group_name,
         )
 
+        return None
+
+    return whatsapp_page
+
+
+def _read_recent_group_messages(whatsapp_page):
+    """Return recent chat messages as {id, outgoing, text} dicts."""
+    try:
+        return whatsapp_page.evaluate(
+            """() => {
+                const nodes = Array.from(
+                    document.querySelectorAll('#main div[data-id]')
+                ).slice(-30);
+
+                return nodes.map((element, index) => {
+                    const id = element.getAttribute('data-id') || `msg-${index}`;
+                    const outgoing = id.startsWith('true_')
+                        || Boolean(element.querySelector(
+                            '[data-icon="msg-check"], [data-icon="msg-dblcheck"], [data-icon="msg-time"]'
+                        ));
+                    const textNode = element.querySelector(
+                        'span.selectable-text, span.copyable-text, .copyable-text'
+                    );
+                    const text = (textNode ? textNode.innerText : element.innerText || '')
+                        .trim();
+
+                    return { id, outgoing, text };
+                });
+            }"""
+        )
+    except Exception:
+        logger.exception("Failed to read WhatsApp group messages")
+        return []
+
+
+def scan_limit_request(browser, group_name, last_seen_id=None):
+    """
+    Look for a new incoming group message containing LIMIT.
+
+    On first run (last_seen_id is None), the latest LIMIT is recorded
+    but not treated as a new request so old chat history is not replayed.
+
+    Returns:
+        (triggered, latest_id)
+    """
+    whatsapp_page = _open_whatsapp_group(browser, group_name)
+
+    if whatsapp_page is None:
+        return False, last_seen_id
+
+    messages = _read_recent_group_messages(whatsapp_page)
+    triggered, latest_id = _select_latest_incoming_limit(
+        messages,
+        last_seen_id,
+    )
+
+    if latest_id is None:
+        return False, last_seen_id
+
+    if last_seen_id is None:
+        logger.info(
+            "Seeding LIMIT listener at message %s without sending",
+            latest_id,
+        )
+        return False, latest_id
+
+    if triggered:
+        logger.info("New incoming WhatsApp LIMIT request: %s", latest_id)
+
+    return triggered, latest_id
+
+
+def _select_latest_incoming_limit(messages, last_seen_id=None):
+    """
+    Pick the newest incoming message containing LIMIT.
+
+    Outgoing messages are ignored so our own copy cannot retrigger.
+
+    Returns:
+        (triggered, latest_matching_id)
+    """
+    latest_limit_id = None
+
+    for message in reversed(messages or []):
+        text = (message or {}).get("text") or ""
+        if "limit" not in text.lower():
+            continue
+        if message.get("outgoing"):
+            continue
+
+        latest_limit_id = message.get("id")
+        break
+
+    if latest_limit_id is None:
+        return False, last_seen_id
+
+    if last_seen_id is None or latest_limit_id == last_seen_id:
+        return False, latest_limit_id
+
+    return True, latest_limit_id
+
+
+def send_whatsapp_message(
+    browser,
+    group_name,
+    message,
+    mention_everyone=False,
+):
+    whatsapp_page = _open_whatsapp_group(browser, group_name)
+
+    if whatsapp_page is None:
         return False
 
     return _send_message_to_current_chat(

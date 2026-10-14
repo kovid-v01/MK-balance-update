@@ -128,6 +128,23 @@ class OwnedBrowserRecoveryTests(unittest.TestCase):
         self.assertEqual(main._pids_listening_on_port(9222), {5678})
 
 
+class ChromeSessionRestoreTests(unittest.TestCase):
+    def test_clear_restored_chrome_windows_removes_session_files(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            default_dir = Path(tmp) / "Default"
+            sessions_dir = default_dir / "Sessions"
+            sessions_dir.mkdir(parents=True)
+            (default_dir / "Current Session").write_text("session")
+            (sessions_dir / "Tabs_1").write_text("tabs")
+
+            main._clear_restored_chrome_windows(tmp, MagicMock())
+
+            self.assertFalse((default_dir / "Current Session").exists())
+            self.assertFalse((sessions_dir / "Tabs_1").exists())
+
+
 class BrowserLaunchFocusTests(unittest.TestCase):
     @patch("main.subprocess.Popen")
     @patch("main._validate_browser_config", return_value=True)
@@ -173,24 +190,20 @@ class PortalReplacementTests(unittest.TestCase):
         existing = MagicMock()
         existing.title.return_value = "WhatsApp"
         existing.url = "https://web.whatsapp.com/"
+        existing.context.new_cdp_session.side_effect = Exception("no window id")
         new_tab = MagicMock()
         new_tab.url = "https://portal.example/"
         context = MagicMock()
         context.pages = [existing]
-        cdp = MagicMock()
 
-        def create_target(method, params):
+        def open_tab(script, url=None):
             context.pages = [existing, new_tab]
-            return {"targetId": "1"}
 
-        cdp.send.side_effect = create_target
-        context.new_cdp_session.return_value = cdp
+        existing.evaluate.side_effect = open_tab
 
         result = browser._open_page(context, "https://portal.example/")
 
-        context.new_cdp_session.assert_called_once_with(existing)
-        cdp.send.assert_called_once()
-        self.assertEqual(cdp.send.call_args.args[1]["newWindow"], False)
+        existing.evaluate.assert_called_once()
         context.new_page.assert_not_called()
         self.assertIs(result, new_tab)
 

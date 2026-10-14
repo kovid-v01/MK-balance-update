@@ -35,23 +35,17 @@ class Decision:
 #   ₹9 L   -> below ₹10 L
 #   ₹25 L  -> below ₹30 L
 #   ₹45 L  -> below ₹50 L
-#   ₹80 L  -> below ₹1 CR
-#   ₹1.2 CR -> normal
+#   ₹80 L  -> no alert
 BALANCE_ALERT_THRESHOLDS = (
     (1_000_000, "10 L", Severity.CRITICAL),
     (3_000_000, "30 L", Severity.HIGH),
     (5_000_000, "50 L", Severity.WARNING),
-    (10_000_000, "1 CR", Severity.WARNING),
 )
 
 
 # Do not send any WhatsApp balance update or alert
 # when the balance is below this amount.
-#
-# NOTE:
-# This is currently ₹100 because that is what your
-# existing implementation used.
-MESSAGE_SUPPRESSION_THRESHOLD = 100
+MESSAGE_SUPPRESSION_THRESHOLD = 2000
 
 
 def get_alert_threshold(balance_value):
@@ -92,6 +86,7 @@ def evaluate_balance(
     app_name=None,
     should_alert=False,
     alert_threshold=None,
+    limit_requested=False,
 ):
     """
     Apply deterministic business rules to the retrieved balance.
@@ -114,6 +109,10 @@ def evaluate_balance(
 
         alert_threshold:
             Threshold returned by get_alert_threshold().
+
+        limit_requested:
+            Whether a WhatsApp group message containing LIMIT
+            asked for a one-off balance update.
 
     Returns:
         Decision object.
@@ -178,8 +177,8 @@ def evaluate_balance(
     #   2. Send the alert with @all
     #   3. Save the threshold in alert memory
     #
-    # If should_alert=False, the normal balance message
-    # will be returned instead.
+    # If should_alert=False, a LIMIT request may still
+    # receive a one-off balance. Otherwise send nothing.
     # ---------------------------------------------------------
 
     if should_alert and alert_threshold is not None:
@@ -198,26 +197,26 @@ def evaluate_balance(
         )
 
     # ---------------------------------------------------------
-    # 5. Normal balance update
-    # ---------------------------------------------------------
-    #
-    # This is returned when:
-    #
-    #   - balance is valid
-    #   - balance is positive
-    #   - balance is above suppression threshold
-    #   - no new alert needs to be generated
-    #
-    # The normal balance message can therefore be sent
-    # every scheduled cycle.
+    # 5. One-off balance after a LIMIT request
     # ---------------------------------------------------------
 
-    label = app_name or "MK Balance"
+    if limit_requested:
+        label = app_name or "MK Balance"
+
+        return Decision(
+            action=Action.SEND_BALANCE,
+            severity=Severity.NORMAL,
+            reason="Balance requested by a WhatsApp LIMIT message.",
+            message=f"{label}: {balance_text}",
+            mention_everyone=False,
+        )
+
+    # ---------------------------------------------------------
+    # 6. No WhatsApp action
+    # ---------------------------------------------------------
 
     return Decision(
-        action=Action.SEND_BALANCE,
+        action=Action.NO_ACTION,
         severity=Severity.NORMAL,
-        reason="Balance is valid for scheduled update.",
-        message=f"{label}: {balance_text}",
-        mention_everyone=False,
+        reason="No new threshold alert and no LIMIT request.",
     )

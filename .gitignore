@@ -28,3 +28,6 @@ Thumbs.db
 
 # Chrome profile
 chrome-profile/
+
+# Runtime state
+data/*.json

@@ -171,9 +171,12 @@ Then start the application:
 python app\main.py
 ```
 
-The script now runs continuously in a scheduling loop. By default it checks the
-portal on 5-minute wall-clock boundaries and sends the balance to the WhatsApp
-group `Automations test`.
+The script now runs continuously. By default it refreshes the portal about every
+5 minutes to watch 50 L / 30 L / 10 L alerts, and polls the WhatsApp group about
+every 20 seconds for an incoming `LIMIT` request. It does not send a routine
+balance on that portal interval. WhatsApp is used only for a LIMIT reply or a
+new one-time threshold alert (balance, then `@all`). Balances below ₹2,000 are
+not posted.
 
 To let the app launch a browser profile for you, pass a browser name:
 
@@ -193,6 +196,7 @@ Optional environment variables:
 ```powershell
 $env:WHATSAPP_GROUP_NAME = "Automations test"
 $env:CHECK_INTERVAL_SECONDS = "300"
+$env:LIMIT_POLL_SECONDS = "20"
 $env:PORTAL_URL = "https://example-portal-url/"
 $env:WHATSAPP_URL = "https://web.whatsapp.com/"
 $env:CHROME_BROWSER_PATH = "C:\Program Files\Google\Chrome\Application\chrome.exe"
@@ -277,6 +281,10 @@ Create a task that runs only when you are logged on:
 
 Do not choose "Run whether user is logged on or not". Chrome will not work
 correctly in that mode.
+
+After pulling code changes, stop the existing Task Scheduler `python.exe` (or
+end the task) and start it again. An old process keeps the previous send
+behavior.
 
 ---
 

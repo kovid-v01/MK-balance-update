@@ -8,10 +8,10 @@ The project currently uses browser automation to:
 
 1. Connect to an existing browser session.
 2. Open/find the retailer dashboard.
-3. Refresh and extract the current balance.
+3. Refresh and extract the current balance on a portal interval.
 4. Apply decision logic.
-5. Send balance updates or alerts to WhatsApp.
-6. Run repeatedly on a fixed schedule.
+5. Send WhatsApp only for a LIMIT request or a new 50 L / 30 L / 10 L alert.
+6. Poll the WhatsApp group for incoming LIMIT messages more often than the portal refresh.
 
 ## Important Files
 
@@ -59,6 +59,27 @@ then:
 * Log the negative balance for troubleshooting.
 * Continue running the automation.
 * Do not allow an LLM to override this rule.
+
+### Message suppression
+
+If:
+
+```text
+balance < 2000
+```
+
+then:
+
+* Do not send a LIMIT reply.
+* Do not send a threshold alert.
+* Log the suppressed balance and continue.
+
+### WhatsApp send rules
+
+* Do not send a routine balance on the portal schedule.
+* Send a normal balance only when a new incoming group message contains `LIMIT` (case-insensitive substring, not sent by us).
+* First time the balance drops below 50 L, 30 L, or 10 L, send the balance then an `@all` alert once. Persist that threshold only if the alert send succeeds. Clear it if the balance recovers so a later drop can alert again.
+* Do not put the word `LIMIT` in outbound WhatsApp copy.
 
 ## LLM Architecture
 

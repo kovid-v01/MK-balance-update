@@ -1,3 +1,4 @@
+import json
 import re
 import subprocess
 import sys
@@ -16,6 +17,7 @@ from browser import (
     ensure_whatsapp_tab_open,
     get_portal_balance,
     open_browser_session,
+    scan_limit_request,
     send_whatsapp_message,
     send_whatsapp_current_chat_message,
     wait_for_cdp_endpoint,
@@ -41,7 +43,9 @@ from alert_memory import (
 # ENVIRONMENT
 # ============================================================
 
-load_dotenv()
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+os.chdir(PROJECT_ROOT)
+load_dotenv(PROJECT_ROOT / ".env")
 
 
 # ============================================================
@@ -61,6 +65,8 @@ LOG_FILE = LOG_DIR / "app.log"
 DEFAULT_GROUP_NAME = "Mewar 🤝Vananam MK LIMIT"
 
 DEFAULT_CHECK_INTERVAL_SECONDS = 300
+DEFAULT_LIMIT_POLL_SECONDS = 20
+LIMIT_STATE_FILE = Path("data") / "limit_request.json"
 
 DEFAULT_REMOTE_DEBUGGING_PORT = 9222
 CDP_STARTUP_TIMEOUT_SECONDS = 30
@@ -84,6 +90,8 @@ DEFAULT_BRAVE_PROFILE_DIR = r"C:\brave-debug-profile"
 # SW_SHOWNOACTIVATE: show the window without making it the foreground window.
 SW_SHOWNOACTIVATE = 4
 
+AUTOMATION_BUILD = "2026-10-07-single-window"
+
 
 SUPPORTED_BROWSER_NAMES = {
     "existing",
@@ -95,6 +103,29 @@ SUPPORTED_BROWSER_NAMES = {
 # ============================================================
 # BALANCE PARSING
 # ============================================================
+
+def _load_limit_state():
+    if not LIMIT_STATE_FILE.exists():
+        return {"last_seen_id": None}
+
+    try:
+        with LIMIT_STATE_FILE.open("r", encoding="utf-8") as file:
+            state = json.load(file)
+        return {
+            "last_seen_id": state.get("last_seen_id"),
+        }
+    except Exception:
+        logging.getLogger(__name__).exception(
+            "Failed to load LIMIT request state"
+        )
+        return {"last_seen_id": None}
+
+
+def _save_limit_state(last_seen_id):
+    LIMIT_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with LIMIT_STATE_FILE.open("w", encoding="utf-8") as file:
+        json.dump({"last_seen_id": last_seen_id}, file, indent=2)
+
 
 def _parse_balance_value(balance_text):
     """
@@ -347,6 +378,35 @@ def _wait_until_cdp_unavailable(port, timeout_seconds=20):
     return not cdp_endpoint_is_ready(port)
 
 
+def _clear_restored_chrome_windows(user_data_dir, logger):
+    """Stop Chrome from restoring the previous two-window session on launch."""
+    default_dir = Path(user_data_dir) / "Default"
+    removed = []
+
+    for name in (
+        "Current Session",
+        "Last Session",
+        "Current Tabs",
+        "Last Tabs",
+    ):
+        path = default_dir / name
+        if path.is_file():
+            path.unlink()
+            removed.append(name)
+
+    sessions_dir = default_dir / "Sessions"
+    if sessions_dir.is_dir():
+        for path in sessions_dir.iterdir():
+            if path.is_file():
+                path.unlink()
+                removed.append(path.name)
+
+    if removed:
+        logger.info(
+            "Cleared Chrome session restore files so only one window opens"
+        )
+
+
 def _launch_browser(browser_name):
     """
     Launch Chrome or Brave with remote debugging enabled.
@@ -393,6 +453,8 @@ def _launch_browser(browser_name):
         user_data_dir,
     )
 
+    _clear_restored_chrome_windows(user_data_dir, logger)
+
     launch_kwargs = {
         "stdout": subprocess.DEVNULL,
         "stderr": subprocess.DEVNULL,
@@ -416,6 +478,8 @@ def _launch_browser(browser_name):
             "--no-default-browser-check",
             "--disable-session-crashed-bubble",
             "--hide-crash-restore-bubble",
+            "--disable-restore-session-state",
+            "about:blank",
         ],
         **launch_kwargs,
     )
@@ -588,7 +652,7 @@ def _acquire_instance_lock(logger):
     """Prevent Task Scheduler from starting a second copy of this script."""
     global _INSTANCE_LOCK_FILE
 
-    lock_path = Path("logs") / "automation.lock"
+    lock_path = PROJECT_ROOT / "logs" / "automation.lock"
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     lock_file = open(lock_path, "a+")
 
@@ -628,6 +692,8 @@ def main():
 
     if not _acquire_instance_lock(logger):
         sys.exit(1)
+
+    logger.info("MK Balance automation starting (%s)", AUTOMATION_BUILD)
 
     # --------------------------------------------------------
     # Browser mode
@@ -669,11 +735,20 @@ def main():
         )
     )
 
+    limit_poll_seconds = int(
+        os.getenv(
+            "LIMIT_POLL_SECONDS",
+            str(DEFAULT_LIMIT_POLL_SECONDS),
+        )
+    )
+
     # --------------------------------------------------------
     # Load alert memory
     # --------------------------------------------------------
 
     alert_state = load_alert_state()
+    limit_state = _load_limit_state()
+    last_limit_id = limit_state.get("last_seen_id")
 
     logger.info(
         "Alert memory initialized: %s",
@@ -700,8 +775,13 @@ def main():
     )
 
     logger.info(
-        "Schedule interval: %s seconds",
+        "Portal check interval: %s seconds",
         check_interval_seconds,
+    )
+
+    logger.info(
+        "LIMIT poll interval: %s seconds",
+        limit_poll_seconds,
     )
 
     # --------------------------------------------------------
@@ -764,6 +844,7 @@ def main():
                 )
                 consecutive_browser_failures = 0
                 session_needs_recovery = False
+                next_portal_check_at = 0
 
                 # ------------------------------------------------
                 # Pre-open WhatsApp
@@ -786,6 +867,28 @@ def main():
                 # =================================================
 
                 while True:
+
+                    limit_requested = False
+
+                    try:
+                        previous_limit_id = last_limit_id
+                        limit_requested, last_limit_id = scan_limit_request(
+                            browser,
+                            group_name,
+                            last_limit_id,
+                        )
+                        if last_limit_id != previous_limit_id and not limit_requested:
+                            _save_limit_state(last_limit_id)
+                    except Exception:
+                        logger.exception("WhatsApp LIMIT scan failed")
+                        limit_requested = False
+
+                    now = time.monotonic()
+                    portal_due = now >= next_portal_check_at
+
+                    if not portal_due and not limit_requested:
+                        time.sleep(limit_poll_seconds)
+                        continue
 
                     logger.info(
                         "Starting portal check"
@@ -824,17 +927,14 @@ def main():
                             "Unable to retrieve balance"
                         )
 
-                        _sleep_until_next_run(
-                            check_interval_seconds,
-                            logger,
-                        )
-
+                        time.sleep(limit_poll_seconds)
                         continue
 
                     logger.info(
                         "Balance retrieved successfully: %s",
                         balance,
                     )
+                    next_portal_check_at = time.monotonic() + check_interval_seconds
 
                     # =================================================
                     # 2. PARSE BALANCE
@@ -929,6 +1029,7 @@ def main():
                         app_name=app_name,
                         should_alert=should_alert,
                         alert_threshold=alert_threshold,
+                        limit_requested=limit_requested,
                     )
 
                     logger.info(
@@ -949,11 +1050,10 @@ def main():
                             "No WhatsApp message will be sent"
                         )
 
-                        _sleep_until_next_run(
-                            check_interval_seconds,
-                            logger,
-                        )
+                        if limit_requested:
+                            _save_limit_state(last_limit_id)
 
+                        time.sleep(limit_poll_seconds)
                         continue
 
                     # =================================================
@@ -969,11 +1069,7 @@ def main():
                                 "without an alert threshold"
                             )
 
-                            _sleep_until_next_run(
-                                check_interval_seconds,
-                                logger,
-                            )
-
+                            time.sleep(limit_poll_seconds)
                             continue
 
                         threshold_value = (
@@ -1095,11 +1191,10 @@ def main():
                                 "was not successfully sent."
                             )
 
-                        _sleep_until_next_run(
-                            check_interval_seconds,
-                            logger,
-                        )
+                        if limit_requested:
+                            _save_limit_state(last_limit_id)
 
+                        time.sleep(limit_poll_seconds)
                         continue
 
                     # =================================================
@@ -1109,7 +1204,7 @@ def main():
                     if decision.action == Action.SEND_BALANCE:
 
                         logger.info(
-                            "Sending normal balance update"
+                            "Sending LIMIT-requested balance update"
                         )
 
                         try:
@@ -1135,6 +1230,7 @@ def main():
                                 "Balance update sent "
                                 "to WhatsApp group"
                             )
+                            _save_limit_state(last_limit_id)
 
                         else:
 
@@ -1143,11 +1239,7 @@ def main():
                                 "WhatsApp message"
                             )
 
-                        _sleep_until_next_run(
-                            check_interval_seconds,
-                            logger,
-                        )
-
+                        time.sleep(limit_poll_seconds)
                         continue
 
                 if session_needs_recovery:
